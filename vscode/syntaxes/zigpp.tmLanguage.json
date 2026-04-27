@@ -1,0 +1,307 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Zig++",
+  "scopeName": "source.zigpp",
+  "fileTypes": ["zpp"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#multiline-strings" },
+    { "include": "#char-literals" },
+    { "include": "#numbers" },
+    { "include": "#extension-keywords" },
+    { "include": "#builtins" },
+    { "include": "#keywords" },
+    { "include": "#constants" },
+    { "include": "#primitive-types" },
+    { "include": "#function-definition" },
+    { "include": "#trait-definition" },
+    { "include": "#impl-block" },
+    { "include": "#type-names" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.documentation.zigpp",
+          "match": "///.*$"
+        },
+        {
+          "name": "comment.line.double-slash.zigpp",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.zigpp",
+      "begin": "\"",
+      "end": "\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.zigpp" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.zigpp" }
+      },
+      "patterns": [
+        {
+          "name": "constant.character.escape.zigpp",
+          "match": "\\\\(n|r|t|\\\\|\"|'|0)"
+        },
+        {
+          "name": "constant.character.escape.hex.zigpp",
+          "match": "\\\\x[0-9A-Fa-f]{2}"
+        },
+        {
+          "name": "constant.character.escape.unicode.zigpp",
+          "match": "\\\\u\\{[0-9A-Fa-f]+\\}"
+        },
+        {
+          "name": "invalid.illegal.unknown-escape.zigpp",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "multiline-strings": {
+      "name": "string.quoted.multiline.zigpp",
+      "begin": "\\\\\\\\",
+      "end": "$",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.zigpp" }
+      }
+    },
+    "char-literals": {
+      "name": "string.quoted.single.zigpp",
+      "begin": "'",
+      "end": "'",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.zigpp" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.zigpp" }
+      },
+      "patterns": [
+        {
+          "name": "constant.character.escape.zigpp",
+          "match": "\\\\(n|r|t|\\\\|\"|'|0)"
+        },
+        {
+          "name": "constant.character.escape.hex.zigpp",
+          "match": "\\\\x[0-9A-Fa-f]{2}"
+        },
+        {
+          "name": "constant.character.escape.unicode.zigpp",
+          "match": "\\\\u\\{[0-9A-Fa-f]+\\}"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.hex.zigpp",
+          "match": "\\b0x[0-9A-Fa-f][0-9A-Fa-f_]*\\.[0-9A-Fa-f][0-9A-Fa-f_]*([pP][-+]?[0-9][0-9_]*)?\\b"
+        },
+        {
+          "name": "constant.numeric.float.zigpp",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][-+]?[0-9][0-9_]*)?\\b"
+        },
+        {
+          "name": "constant.numeric.float.zigpp",
+          "match": "\\b[0-9][0-9_]*[eE][-+]?[0-9][0-9_]*\\b"
+        },
+        {
+          "name": "constant.numeric.integer.hexadecimal.zigpp",
+          "match": "\\b0x[0-9A-Fa-f][0-9A-Fa-f_]*\\b"
+        },
+        {
+          "name": "constant.numeric.integer.binary.zigpp",
+          "match": "\\b0b[01][01_]*\\b"
+        },
+        {
+          "name": "constant.numeric.integer.octal.zigpp",
+          "match": "\\b0o[0-7][0-7_]*\\b"
+        },
+        {
+          "name": "constant.numeric.integer.decimal.zigpp",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.zigpp",
+          "match": "@[A-Za-z_][A-Za-z0-9_]*"
+        }
+      ]
+    },
+    "extension-keywords": {
+      "patterns": [
+        {
+          "name": "keyword.zigpp.extension",
+          "match": "\\b(trait|impl|dyn|using|owned|own|move|where|requires|ensures|effects|derive|interface)\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.zigpp",
+          "match": "\\b(if|else|while|for|switch|return|break|continue|defer|errdefer|try|catch|orelse|unreachable|asm)\\b"
+        },
+        {
+          "name": "keyword.operator.logical.zigpp",
+          "match": "\\b(and|or)\\b"
+        },
+        {
+          "name": "storage.type.zigpp",
+          "match": "\\b(const|var|fn|struct|enum|union|error)\\b"
+        },
+        {
+          "name": "storage.modifier.zigpp",
+          "match": "\\b(pub|comptime|inline|noinline|extern|export|packed|align|linksection|volatile|allowzero|usingnamespace|callconv|test)\\b"
+        },
+        {
+          "name": "keyword.other.zigpp",
+          "match": "\\b(anytype|anyerror|anyopaque|noreturn)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.zigpp",
+          "match": "\\b(null|undefined|true|false)\\b"
+        }
+      ]
+    },
+    "primitive-types": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.zigpp",
+          "match": "\\b(i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f16|f32|f64|f80|f128|bool|void|c_char|c_short|c_ushort|c_int|c_uint|c_long|c_ulong|c_longlong|c_ulonglong|c_longdouble|comptime_int|comptime_float)\\b"
+        },
+        {
+          "name": "support.type.primitive.sized.zigpp",
+          "match": "\\b(i|u)[0-9]+\\b"
+        }
+      ]
+    },
+    "function-definition": {
+      "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "storage.type.zigpp" },
+        "2": { "name": "entity.name.function.zigpp" }
+      }
+    },
+    "trait-definition": {
+      "match": "\\b(trait|interface)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.zigpp.extension" },
+        "2": { "name": "entity.name.type.trait.zigpp" }
+      }
+    },
+    "impl-block": {
+      "match": "\\b(impl)\\s+([A-Za-z_][A-Za-z0-9_]*)(?:\\s+(for)\\s+([A-Za-z_][A-Za-z0-9_]*))?",
+      "captures": {
+        "1": { "name": "keyword.zigpp.extension" },
+        "2": { "name": "entity.name.type.trait.zigpp" },
+        "3": { "name": "keyword.zigpp.extension" },
+        "4": { "name": "entity.name.type.zigpp" }
+      }
+    },
+    "type-names": {
+      "patterns": [
+        {
+          "name": "entity.name.type.zigpp",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.assignment.compound.zigpp",
+          "match": "(\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=|<<=|>>=)"
+        },
+        {
+          "name": "keyword.operator.comparison.zigpp",
+          "match": "(==|!=|<=|>=|<(?!<)|>(?!>))"
+        },
+        {
+          "name": "keyword.operator.logical.zigpp",
+          "match": "(&&|\\|\\||!)"
+        },
+        {
+          "name": "keyword.operator.bitwise.zigpp",
+          "match": "(<<|>>|&|\\||\\^|~)"
+        },
+        {
+          "name": "keyword.operator.arithmetic.zigpp",
+          "match": "(\\+|-|\\*|/|%)"
+        },
+        {
+          "name": "keyword.operator.arrow.zigpp",
+          "match": "(=>|->)"
+        },
+        {
+          "name": "keyword.operator.range.zigpp",
+          "match": "(\\.\\.\\.|\\.\\.)"
+        },
+        {
+          "name": "keyword.operator.assignment.zigpp",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.optional.zigpp",
+          "match": "\\?"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.section.block.begin.zigpp",
+          "match": "\\{"
+        },
+        {
+          "name": "punctuation.section.block.end.zigpp",
+          "match": "\\}"
+        },
+        {
+          "name": "punctuation.section.brackets.begin.zigpp",
+          "match": "\\["
+        },
+        {
+          "name": "punctuation.section.brackets.end.zigpp",
+          "match": "\\]"
+        },
+        {
+          "name": "punctuation.section.parens.begin.zigpp",
+          "match": "\\("
+        },
+        {
+          "name": "punctuation.section.parens.end.zigpp",
+          "match": "\\)"
+        },
+        {
+          "name": "punctuation.terminator.statement.zigpp",
+          "match": ";"
+        },
+        {
+          "name": "punctuation.separator.comma.zigpp",
+          "match": ","
+        },
+        {
+          "name": "punctuation.separator.colon.zigpp",
+          "match": ":"
+        },
+        {
+          "name": "punctuation.accessor.dot.zigpp",
+          "match": "\\."
+        }
+      ]
+    }
+  }
+}

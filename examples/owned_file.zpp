@@ -1,0 +1,64 @@
+/// owned_file.zpp — `owned struct LogFile` with init/deinit/writeLine,
+/// scoped through `using log = try LogFile.init(...)`.
+///
+/// Teaches: `owned struct` (sema rejects the type if `deinit` is missing or
+/// if any value of the type can be dropped without `deinit` being called),
+/// and `using v = expr;` which lowers to `var v = expr; defer v.deinit();`.
+///
+/// Lowered Zig sketch:
+///     const LogFile = struct {
+///         file: std.fs.File,
+///         pub fn init(path: []const u8) !LogFile { ... }
+///         pub fn deinit(self: *LogFile) void { self.file.close(); }
+///         pub fn writeLine(self: *LogFile, line: []const u8) !void { ... }
+///     };
+///     var log = try LogFile.init("trace.log");
+///     defer log.deinit();
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+owned struct LogFile {
+    file: std.fs.File,
+
+    pub fn init(path: []const u8) !LogFile {
+        const f = try std.fs.cwd().createFile(path, .{ .truncate = true });
+        return .{ .file = f };
+    }
+
+    pub fn deinit(self: *LogFile) void {
+        self.file.close();
+    }
+
+    pub fn writeLine(self: *LogFile, line: []const u8) !void {
+        try self.file.writeAll(line);
+        try self.file.writeAll("\n");
+    }
+}
+
+// If `deinit` were removed from `owned struct LogFile`, the compiler would
+// emit:  error: owned struct 'LogFile' must declare 'pub fn deinit'.
+// Likewise, dropping a `LogFile` without `using` (or an explicit `defer
+// log.deinit()`) is a sema error: "owned value 'log' leaves scope without
+// deinit".
+
+fn drainAndClose(log: own LogFile) !void {
+    own var local = move log;
+    try local.writeLine("drained");
+    local.deinit();
+}
+
+pub fn main() !void {
+    using log = try LogFile.init("trace.log");
+
+    try log.writeLine("startup");
+    try log.writeLine("doing work");
+    try log.writeLine("shutdown");
+
+    own var transferable = try LogFile.init("trace2.log");
+    try transferable.writeLine("about to transfer");
+    try drainAndClose(move transferable);
+
+    std.debug.print("wrote 3 lines to trace.log; LogFile.deinit will run on scope exit\n", .{});
+    std.debug.print("transferable was move'd into drainAndClose, so this scope no longer owns it\n", .{});
+}

@@ -1,0 +1,8 @@
+const std = @import("std");
+
+fn run(allocator: std.mem.Allocator) !void {
+    using arena = zpp.ArenaScope.init(allocator);
+    const a = arena.allocator();
+    const buf = try a.alloc(u8, 16);
+    _ = buf;
+}

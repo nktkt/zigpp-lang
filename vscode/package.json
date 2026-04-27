@@ -1,0 +1,103 @@
+{
+  "name": "zigpp",
+  "displayName": "Zig++ Language Support",
+  "description": "Syntax highlighting, LSP diagnostics, and run/lower commands for the Zig++ language (.zpp).",
+  "version": "0.1.0",
+  "publisher": "zigpp",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.84.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Formatters"
+  ],
+  "keywords": [
+    "zig",
+    "zigpp",
+    "zig++",
+    "zpp",
+    "lsp"
+  ],
+  "activationEvents": [
+    "onLanguage:zigpp"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "zigpp",
+        "aliases": [
+          "Zig++",
+          "zigpp"
+        ],
+        "extensions": [
+          ".zpp"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "zigpp",
+        "scopeName": "source.zigpp",
+        "path": "./syntaxes/zigpp.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Zig++",
+      "properties": {
+        "zigpp.lsp.path": {
+          "type": "string",
+          "default": "zpp-lsp",
+          "description": "Path to the zpp-lsp executable. Defaults to 'zpp-lsp' on PATH."
+        },
+        "zigpp.formatter.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable formatting via the Zig++ language server."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "zigpp.run",
+        "title": "Zig++: Run Current File",
+        "category": "Zig++"
+      },
+      {
+        "command": "zigpp.lower",
+        "title": "Zig++: Show Lowered Zig",
+        "category": "Zig++"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "zigpp.run",
+        "key": "ctrl+f5",
+        "mac": "cmd+f5",
+        "when": "editorTextFocus && editorLangId == zigpp"
+      },
+      {
+        "command": "zigpp.lower",
+        "key": "ctrl+shift+l",
+        "mac": "cmd+shift+l",
+        "when": "editorTextFocus && editorLangId == zigpp"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.84.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

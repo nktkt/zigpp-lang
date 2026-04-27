@@ -1,0 +1,80 @@
+/// dyn_plugin.zpp — dynamic dispatch through `dyn AudioEffect`.
+///
+/// Teaches: `dyn Trait` is a *visible* fat pointer — the source explicitly
+/// says "this call is indirect through a vtable". Compare with
+/// `examples/hello_trait.zpp`, which uses `impl Trait` (static).
+///
+/// Lowered Zig sketch:
+///     const AudioEffect_VTable = struct {
+///         process: *const fn (ctx: *anyopaque, samples: []f32) void,
+///     };
+///     const AudioEffect_Dyn = struct {
+///         ctx: *anyopaque,
+///         vtable: *const AudioEffect_VTable,
+///     };
+///     fn applyAll(chain: []const AudioEffect_Dyn, samples: []f32) void {
+///         for (chain) |e| e.vtable.process(e.ctx, samples);
+///     }
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+trait AudioEffect {
+    fn process(self, samples: []f32) void;
+}
+
+const Gain = struct {
+    factor: f32,
+};
+
+const Reverb = struct {
+    decay: f32,
+    last: f32 = 0.0,
+};
+
+impl AudioEffect for Gain {
+    fn process(self, samples: []f32) void {
+        for (samples) |*s| s.* *= self.factor;
+    }
+}
+
+impl AudioEffect for Reverb {
+    fn process(self, samples: []f32) void {
+        var prev = self.last;
+        for (samples) |*s| {
+            const out = s.* + prev * self.decay;
+            prev = out;
+            s.* = out;
+        }
+    }
+}
+
+fn applyAll(chain: []const dyn AudioEffect, samples: []f32) void {
+    for (chain) |effect| {
+        effect.vtable.process(effect.ptr, samples);
+    }
+}
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const samples = try allocator.alloc(f32, 8);
+    defer allocator.free(samples);
+    for (samples, 0..) |*s, i| s.* = @floatFromInt(i + 1);
+
+    var gain = Gain{ .factor = 0.5 };
+    var reverb = Reverb{ .decay = 0.25 };
+
+    const chain = [_]dyn AudioEffect{
+        zpp.Dyn(AudioEffect_VTable).init(Gain, &gain, &AudioEffect_impl_for_Gain),
+        zpp.Dyn(AudioEffect_VTable).init(Reverb, &reverb, &AudioEffect_impl_for_Reverb),
+    };
+    applyAll(&chain, samples);
+
+    std.debug.print("processed samples:", .{});
+    for (samples) |s| std.debug.print(" {d:.3}", .{s});
+    std.debug.print("\n", .{});
+    std.debug.print("(dynamic dispatch: each `effect.process` is one indirect call through the visible vtable)\n", .{});
+}

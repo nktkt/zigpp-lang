@@ -1,0 +1,39 @@
+/// async_group.zpp — structured concurrency via `zpp.async_mod.TaskGroup`.
+///
+/// Teaches: every concurrency primitive in Zig++ is *explicit*. `spawn`
+/// schedules a task on the group, `join` blocks until every spawned task
+/// has completed. There is no implicit await, no hidden executor — the
+/// `TaskGroup` is just a struct that owns its workers.
+///
+/// Lowered Zig sketch:
+///     var group = zpp.async_mod.TaskGroup.init(allocator);
+///     defer group.deinit();
+///     _ = try group.spawn(work, .{0});
+///     _ = try group.spawn(work, .{1});
+///     try group.join();
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+fn work(id: u64) void {
+    var acc: u64 = 0;
+    var i: u64 = 0;
+    while (i < 1000) : (i += 1) acc +%= id *% i;
+    std.debug.print("task[{d}] = {d}\n", .{ id, acc });
+}
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var group = zpp.async_mod.TaskGroup.init(allocator);
+    defer group.deinit();
+
+    _ = try group.spawn(work, .{@as(u64, 1)});
+    _ = try group.spawn(work, .{@as(u64, 2)});
+    _ = try group.spawn(work, .{@as(u64, 3)});
+
+    try group.join();
+    std.debug.print("(spawn and join are visible; the group is deinit'd by defer)\n", .{});
+}

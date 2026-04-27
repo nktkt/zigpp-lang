@@ -1,0 +1,61 @@
+/// effects_pure.zpp — `effects(...)` annotations.
+///
+/// Teaches: every Zig++ function declares the *capabilities* it uses.
+/// `.noalloc` forbids any call into the allocator; `.noio` forbids any
+/// call into std.fs / std.os.read / std.os.write; `.alloc` and `.io`
+/// declare the opposite. Effects propagate up: a `.noalloc` function
+/// may only call other `.noalloc` (or implicitly-pure) functions. The
+/// compiler rejects violations at sema time.
+///
+/// Lowered Zig sketch:
+///     // effect annotations are erased after sema; they leave behind a
+///     // comptime-only `pub const __zpp_effects = .{ .noalloc, .noio };`
+///     // decl that tools can introspect.
+///     fn fnv1a(bytes: []const u8) u64 { ... }
+///     fn loadAndHash(a: std.mem.Allocator, path: []const u8) !u64 { ... }
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
+
+fn fnv1a(bytes: []const u8) u64 effects(.noalloc, .noio) {
+    var h: u64 = FNV_OFFSET;
+    for (bytes) |b| {
+        h ^= b;
+        h *%= FNV_PRIME;
+    }
+    return h;
+}
+
+fn loadAndHash(a: std.mem.Allocator, path: []const u8) !u64 effects(.alloc, .io) {
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+    const stat = try file.stat();
+    const buf = try a.alloc(u8, stat.size);
+    defer a.free(buf);
+    _ = try file.readAll(buf);
+    return fnv1a(buf);
+}
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const literal_hash = fnv1a("the quick brown fox");
+    std.debug.print("fnv1a(\"the quick brown fox\") = {x}\n", .{literal_hash});
+
+    const tmp_path = "effects_pure.tmp";
+    {
+        const f = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("the quick brown fox");
+    }
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    const file_hash = try loadAndHash(allocator, tmp_path);
+    std.debug.print("loadAndHash(..)              = {x}\n", .{file_hash});
+    std.debug.print("(fnv1a is .noalloc/.noio; loadAndHash is .alloc/.io)\n", .{});
+}

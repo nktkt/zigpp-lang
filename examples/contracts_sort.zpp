@@ -1,0 +1,77 @@
+/// contracts_sort.zpp — generic `binarySearch` constrained by `where T: Ord`,
+/// guarded by `requires` / `ensures` contracts.
+///
+/// Teaches: `where T: Trait` constrains a comptime generic to types that
+/// implement a trait; `requires(cond)` checks a precondition on entry;
+/// `ensures(cond)` checks a postcondition on every return. In debug builds
+/// these lower to `std.debug.assert`; in release builds they are erased
+/// (configurable through the runtime contract policy).
+///
+/// Lowered Zig sketch:
+///     fn binarySearch(comptime T: type, xs: []const T, target: T) ?usize {
+///         comptime zpp.contracts.requireImpl(T, Ord);
+///         std.debug.assert(isSorted(T, xs));
+///         // ...body...
+///         const result: ?usize = ...;
+///         std.debug.assert(if (result) |i| xs[i].cmp(target) == 0 else true);
+///         return result;
+///     }
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+trait Ord {
+    fn cmp(self, other: Self) i32;
+}
+
+const Int = struct {
+    v: i32,
+};
+
+impl Ord for Int {
+    fn cmp(self, other: Int) i32 {
+        if (self.v < other.v) return -1;
+        if (self.v > other.v) return 1;
+        return 0;
+    }
+}
+
+fn isSorted(comptime T: type, xs: []const T) bool where T: Ord {
+    if (xs.len < 2) return true;
+    var i: usize = 1;
+    while (i < xs.len) : (i += 1) {
+        var a = xs[i - 1];
+        if (a.cmp(xs[i]) > 0) return false;
+    }
+    return true;
+}
+
+fn binarySearch(comptime T: type, xs: []const T, target: T) ?usize
+    where T: Ord
+    requires(isSorted(T, xs))
+{
+    var lo: usize = 0;
+    var hi: usize = xs.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        var a = xs[mid];
+        const c = a.cmp(target);
+        if (c == 0) return mid;
+        if (c < 0) lo = mid + 1 else hi = mid;
+    }
+    return null;
+}
+
+pub fn main() !void {
+    const xs = [_]Int{
+        .{ .v = -7 }, .{ .v = 0 }, .{ .v = 1 }, .{ .v = 4 },
+        .{ .v = 9 }, .{ .v = 16 }, .{ .v = 25 }, .{ .v = 36 },
+    };
+
+    const hit = binarySearch(Int, &xs, .{ .v = 9 });
+    const miss = binarySearch(Int, &xs, .{ .v = 8 });
+
+    std.debug.print("binarySearch(.., 9)  = {?}\n", .{hit});
+    std.debug.print("binarySearch(.., 8)  = {?}\n", .{miss});
+    std.debug.print("(requires(isSorted) and ensures(...) ran in debug mode)\n", .{});
+}

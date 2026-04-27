@@ -1,0 +1,41 @@
+/// derive_user.zpp — `derive(.{ Hash, Debug, Eq })` on a plain struct.
+///
+/// Teaches: `derive` runs at comptime and synthesizes well-known trait
+/// implementations from the struct's field list. The generated functions
+/// are attached as decls on the type so they're visible at use sites:
+/// `User.hash`, `User.eq`, `User.debug.format`.
+///
+/// Lowered Zig sketch:
+///     const User = struct {
+///         id: u64,
+///         name: []const u8,
+///         pub fn hash(self: User) u64 { ...fnv1a over fields... }
+///         pub fn eq(a: User, b: User) bool { return a.id == b.id and std.mem.eql(u8, a.name, b.name); }
+///         pub const debug = struct {
+///             pub fn format(self: User, w: anytype) !void { ... }
+///         };
+///     };
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+struct User {
+    id: u64,
+    name: []const u8,
+} derive(.{ Hash, Debug, Eq });
+
+pub fn main() !void {
+    const a = User{ .id = 1, .name = "ada" };
+    const b = User{ .id = 1, .name = "ada" };
+    const c = User{ .id = 2, .name = "linus" };
+
+    std.debug.print("a.hash() = {x}\n", .{a.hash()});
+    std.debug.print("c.hash() = {x}\n", .{c.hash()});
+    std.debug.print("User.eq(a, b) = {}\n", .{User.eq(a, b)});
+    std.debug.print("User.eq(a, c) = {}\n", .{User.eq(a, c)});
+
+    var buf: [128]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try User.debug.format(a, &w);
+    std.debug.print("debug(a) = {s}\n", .{w.buffered()});
+}

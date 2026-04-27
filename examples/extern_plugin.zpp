@@ -1,0 +1,52 @@
+/// extern_plugin.zpp — `extern interface AudioPlugin { ... }` for a stable
+/// C-compatible plugin ABI.
+///
+/// Teaches: `extern interface` is the long-lived cousin of `dyn Trait`.
+/// `dyn` is for in-process polymorphism — its vtable layout is an
+/// implementation detail. `extern interface` guarantees a fixed,
+/// `extern struct`-compatible vtable that a plugin compiled against an
+/// older version of the host can still link against.
+///
+/// Lowered Zig sketch:
+///     pub const AudioPlugin_ABI = extern struct {
+///         ctx: ?*anyopaque,
+///         process: *const fn (
+///             ctx: ?*anyopaque,
+///             in: [*]const f32,
+///             out: [*]f32,
+///             n: usize,
+///         ) callconv(.C) void,
+///     };
+///     // Host code receives `*const AudioPlugin_ABI` from dlopen + dlsym.
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+extern interface AudioPlugin {
+    fn process(self, in: [*]const f32, out: [*]f32, n: usize) void;
+}
+
+const PassThrough = struct {};
+
+impl AudioPlugin for PassThrough {
+    fn process(self, in: [*]const f32, out: [*]f32, n: usize) void {
+        _ = self;
+        var i: usize = 0;
+        while (i < n) : (i += 1) out[i] = in[i];
+    }
+}
+
+pub fn main() !void {
+    const input = [_]f32{ 0.1, 0.2, 0.3, 0.4 };
+    var output: [4]f32 = undefined;
+
+    var plugin = PassThrough{};
+    const vt: *const AudioPlugin_ABI = &AudioPlugin_impl_for_PassThrough;
+
+    vt.process(@ptrCast(&plugin), &input, &output, input.len);
+
+    std.debug.print("plugin output:", .{});
+    for (output) |s| std.debug.print(" {d:.2}", .{s});
+    std.debug.print("\n", .{});
+    std.debug.print("(extern interface lowers to extern struct AudioPlugin_ABI with callconv(.C))\n", .{});
+}

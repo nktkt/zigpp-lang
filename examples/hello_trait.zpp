@@ -1,0 +1,56 @@
+/// hello_trait.zpp — defines a `Greeter` trait, implements it for two struct
+/// types, and dispatches statically through `impl Greeter`.
+///
+/// Teaches: `trait`, `impl Trait for Type`, `fn f(x: impl Trait)` static
+/// dispatch (the compiler monomorphizes `welcome` once per concrete type, so
+/// there is no vtable and no indirect call). Each impl method is *also*
+/// injected into the target struct's body so `who.greet()` resolves through
+/// normal Zig method lookup.
+///
+/// Lowered Zig sketch:
+///     const English = struct {
+///         name: []const u8,
+///         pub fn greet(self: *@This()) void { ... }
+///     };
+///     fn welcome(who: anytype) void { who.greet(); }
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+trait Greeter {
+    fn greet(self) void;
+}
+
+const English = struct {
+    name: []const u8,
+};
+
+const Japanese = struct {
+    name: []const u8,
+};
+
+impl Greeter for English {
+    fn greet(self) void {
+        std.debug.print("Hello, {s}!\n", .{self.name});
+    }
+}
+
+impl Greeter for Japanese {
+    fn greet(self) void {
+        std.debug.print("こんにちは、{s}さん!\n", .{self.name});
+    }
+}
+
+fn welcome(who: impl Greeter) void {
+    who.greet();
+}
+
+pub fn main() !void {
+    var en = English{ .name = "Ada" };
+    var jp = Japanese{ .name = "三郎" };
+
+    welcome(&en);
+    welcome(&jp);
+
+    std.debug.print("(static dispatch: two distinct monomorphizations of welcome)\n", .{});
+}

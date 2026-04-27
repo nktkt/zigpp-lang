@@ -1,0 +1,7 @@
+trait Greeter {
+    fn greet(self) []const u8;
+}
+
+fn shout(g: dyn Greeter) []const u8 {
+    return g.greet();
+}

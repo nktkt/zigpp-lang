@@ -1,0 +1,33 @@
+zig-out/
+zig-cache/
+.zig-cache/
+.zpp-cache/
+
+*.o
+*.a
+*.obj
+*.lib
+*.dylib
+*.so
+*.dll
+*.exe
+*.pdb
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# example/test artifacts
+*.log
+tests/fuzz/crashes/
+
+# VS Code extension build output
+vscode/node_modules/
+vscode/out/
+vscode/*.vsix
