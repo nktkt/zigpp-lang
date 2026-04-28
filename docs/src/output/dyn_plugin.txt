@@ -1,0 +1,2 @@
+processed samples: 0.500 1.125 1.781 2.445 3.111 3.778 4.444 5.111
+(dynamic dispatch: each `effect.process` is one indirect call through the visible vtable)

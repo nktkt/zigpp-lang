@@ -1,0 +1,2 @@
+plugin output: 0.10 0.20 0.30 0.40
+(extern interface lowers to extern struct AudioPlugin_ABI with callconv(.C))

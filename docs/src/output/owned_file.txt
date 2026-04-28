@@ -1,0 +1,2 @@
+wrote 3 lines to trace.log; LogFile.deinit will run on scope exit
+transferable was move'd into drainAndClose, so this scope no longer owns it

@@ -1,0 +1,3 @@
+Hello, Ada!
+こんにちは、三郎さん!
+(static dispatch: two distinct monomorphizations of welcome)

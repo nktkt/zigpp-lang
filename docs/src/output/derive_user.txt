@@ -1,0 +1,5 @@
+a.hash() = 25e992b36c9c4bf4
+c.hash() = 9e123d984d58e60a
+User.eq(a, b) = true
+User.eq(a, c) = false
+debug(a) = derive_user.User{ id = 1, name = "ada" }

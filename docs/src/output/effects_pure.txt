@@ -1,0 +1,3 @@
+fnv1a("the quick brown fox") = 59aeb7b40bd8c122
+loadAndHash(..)              = 59aeb7b40bd8c122
+(fnv1a is .noalloc/.noio; loadAndHash is .alloc/.io)

@@ -34,3 +34,6 @@ vscode/*.vsix
 
 # mdBook build output
 docs/book/
+
+# personal scratch
+ANNOUNCE.md

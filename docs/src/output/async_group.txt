@@ -1,0 +1,4 @@
+task[1] = 499500
+task[2] = 999000
+task[3] = 1498500
+(spawn and join are visible; the group is deinit'd by defer)

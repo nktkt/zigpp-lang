@@ -2,12 +2,17 @@
 
 The `examples/` directory contains 8 small `.zpp` programs that
 exercise each Zig++ construct. All of them lower to readable Zig and
-run end-to-end (`zig build e2e` runs the lot).
+run end-to-end (`zig build e2e` runs the lot). Each section below
+shows the source plus the actual stdout produced by `zpp run`.
 
 ## hello_trait.zpp — static dispatch
 
 ```zig
 {{#include ../../examples/hello_trait.zpp}}
+```
+
+```text
+{{#include ./output/hello_trait.txt}}
 ```
 
 `fn welcome(who: impl Greeter)` lowers to `fn welcome(who: anytype)`.
@@ -21,6 +26,10 @@ so `who.greet()` resolves through Zig's normal method lookup.
 {{#include ../../examples/owned_file.zpp}}
 ```
 
+```text
+{{#include ./output/owned_file.txt}}
+```
+
 `using log = LogFile.init(...)` lowers to `var log = ...; defer log.deinit();`.
 `owned struct LogFile` is sema-checked for a `deinit` method.
 
@@ -28,6 +37,10 @@ so `who.greet()` resolves through Zig's normal method lookup.
 
 ```zig
 {{#include ../../examples/dyn_plugin.zpp}}
+```
+
+```text
+{{#include ./output/dyn_plugin.txt}}
 ```
 
 `fn applyAll(chain: []const dyn AudioEffect, ...)` lowers to a slice
@@ -40,24 +53,22 @@ at the call site — there is no implicit virtual dispatch.
 {{#include ../../examples/extern_plugin.zpp}}
 ```
 
+```text
+{{#include ./output/extern_plugin.txt}}
+```
+
 `extern interface AudioPlugin { ... }` lowers to
 `extern struct AudioPlugin_ABI { ... }` with `callconv(.c)` function
 pointers, suitable for dlopen/dlsym plugins.
-
-## owned + move
-
-```zig
-{{#include ../../examples/owned_file.zpp:38:64}}
-```
-
-`own var transferable = ...` declares an affine binding;
-`move transferable` consumes it. Subsequent uses produce diagnostic
-Z0020 with a fix hint.
 
 ## contracts_sort.zpp — requires/ensures + where
 
 ```zig
 {{#include ../../examples/contracts_sort.zpp}}
+```
+
+```text
+{{#include ./output/contracts_sort.txt}}
 ```
 
 `requires(isSorted(T, xs))` is checked at function entry.
@@ -71,6 +82,10 @@ constraint.
 {{#include ../../examples/derive_user.zpp}}
 ```
 
+```text
+{{#include ./output/derive_user.txt}}
+```
+
 `} derive(.{ Hash, Eq, Debug });` injects member methods directly:
 `a.hash()`, `User.eq(a, b)`, `User.debug.format(a, w)`.
 
@@ -80,6 +95,10 @@ constraint.
 {{#include ../../examples/effects_pure.zpp}}
 ```
 
+```text
+{{#include ./output/effects_pure.txt}}
+```
+
 `effects(.noalloc, .noio) fn fnv1a(...)` is sema-linted (Z0030 if it
 calls anything that allocates).
 
@@ -87,6 +106,10 @@ calls anything that allocates).
 
 ```zig
 {{#include ../../examples/async_group.zpp}}
+```
+
+```text
+{{#include ./output/async_group.txt}}
 ```
 
 `zpp.async_mod.TaskGroup` is the MVP serial executor — `spawn`

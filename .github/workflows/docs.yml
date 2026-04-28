@@ -53,6 +53,15 @@ jobs:
       - name: Regenerate API reference from examples
         run: ./zig-out/bin/zpp-doc examples -o docs/src/api
 
+      - name: Regenerate example outputs
+        run: |
+          set -euo pipefail
+          mkdir -p docs/src/output
+          for f in examples/*.zpp; do
+            base=$(basename "$f" .zpp)
+            ./zig-out/bin/zpp run "$f" > "docs/src/output/${base}.txt" 2>&1
+          done
+
       - name: Install mdBook
         run: |
           set -euo pipefail
