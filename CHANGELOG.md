@@ -44,29 +44,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 * install Zig manually from ziglang.org with correct arch-os naming ([f07db58](https://github.com/nktkt/zigpp-lang/commit/f07db585f4ac0b9d51885c8a24275126b22a3751))
 * pin Zig to 0.15.1 (0.15.2 is Homebrew-only, not on mirrors) ([07ae56b](https://github.com/nktkt/zigpp-lang/commit/07ae56b20ade1050f2deca7288ee42abf29f60b0))
 
-## [Unreleased]
-
-### Added
-- GitHub Pages site with mdBook for the spec, manifesto, and roadmap.
-- Dependabot weekly updates for GitHub Actions.
-- CONTRIBUTING.md, issue templates, PR template.
-- Windows CI matrix entry (windows-latest x86_64).
-- `.gitattributes` enforcing LF line endings repo-wide.
-
-### Fixed
-- `mentionsIdent` no longer false-positives on identifiers inside
-  string literals, char literals, or `//` comments — fixes Z0020 firing
-  when a debug print mentions a moved binding.
-- `cmdCheck` probes via `openDir` before `statFile` so directory paths
-  work on Windows (where `statFile` returns `error.IsDir`).
-- Snapshot tests strip `\r` before comparing so they pass on Windows
-  even without `.gitattributes`.
-- `addTestsForTree` now excludes `lowering\snapshots` and
-  `lowering\inputs` (Windows path separator) in addition to the `/`
-  forms.
-- Dropped dead pointer-arithmetic computation of `sig_end` in
-  `parser.zig` (immediately overwritten — surfaced by fuzz audit).
-
 ## [0.1.0] - 2026-04-27
 
 First tagged release. Pre-alpha.
@@ -104,5 +81,4 @@ First tagged release. Pre-alpha.
 - **GitHub Actions CI** for ubuntu-latest and macos-latest.
 - **MANIFESTO.md / LANGUAGE.md / ROADMAP.md** design docs.
 
-[Unreleased]: https://github.com/nktkt/zigpp-lang/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/nktkt/zigpp-lang/releases/tag/v0.1.0
