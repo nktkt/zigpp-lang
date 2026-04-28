@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/nktkt/zigpp-lang/actions/workflows/ci.yml/badge.svg)](https://github.com/nktkt/zigpp-lang/actions/workflows/ci.yml)
 [![docs](https://github.com/nktkt/zigpp-lang/actions/workflows/docs.yml/badge.svg)](https://nktkt.github.io/zigpp-lang/)
+[![CodeQL](https://github.com/nktkt/zigpp-lang/actions/workflows/codeql.yml/badge.svg)](https://github.com/nktkt/zigpp-lang/actions/workflows/codeql.yml)
 [![Zig 0.15+](https://img.shields.io/badge/zig-0.15%2B-orange)](https://ziglang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 

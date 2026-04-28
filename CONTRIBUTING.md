@@ -102,10 +102,37 @@ ZPP_FUZZ_ITERS=10000 zig build fuzz
 If you find a crash, leave the input under `tests/fuzz/crashes/`
 (gitignored) and open an issue.
 
+## Commit messages
+
+This repo uses [Conventional Commits](https://www.conventionalcommits.org/)
+so that [release-please](https://github.com/googleapis/release-please)
+can compute the next version and assemble the changelog automatically.
+Use one of these prefixes:
+
+| Prefix      | Meaning                                       | Bumps     |
+| ----------- | --------------------------------------------- | --------- |
+| `feat:`     | new user-visible feature                      | minor     |
+| `fix:`      | bug fix                                       | patch     |
+| `perf:`     | performance improvement                       | patch     |
+| `refactor:` | internal refactor, no behaviour change        | none      |
+| `docs:`     | docs only                                     | none      |
+| `ci:`       | CI / workflow change                          | none      |
+| `build:`    | build script change                           | none      |
+| `test:`     | test-only change                              | none      |
+| `chore:`    | repo housekeeping                             | none      |
+
+Add `!` after the prefix or a `BREAKING CHANGE:` footer to signal a
+major bump (e.g. `feat!: drop using` or `feat: ...` plus
+`BREAKING CHANGE: removed using`).
+
 ## Releases
 
-Releases are tagged `vX.Y.Z` and accompanied by a GitHub release with
-notes. The maintainer cuts releases; please don't push tags directly.
+Releases are managed by [release-please](https://github.com/googleapis/release-please).
+On every push to `main`, the bot opens or updates a "release PR" that
+collects the conventional-commit titles into a `CHANGELOG.md` entry
+and bumps the version in `.github/.release-please-manifest.json`.
+Merging the release PR cuts a new tag (`vX.Y.Z`) and publishes a
+GitHub release. Maintainers should not push tags by hand.
 
 ## License
 
