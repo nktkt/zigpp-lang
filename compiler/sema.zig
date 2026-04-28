@@ -338,7 +338,32 @@ fn findMoveTarget(text: []const u8, from: usize) ?struct { name: []const u8, end
 fn mentionsIdent(text: []const u8, name: []const u8) bool {
     var i: usize = 0;
     while (i < text.len) {
-        if (isIdent(text[i])) {
+        const c = text[i];
+        // Skip over double-quoted string literals so identifiers mentioned in
+        // a debug message don't count as a use.
+        if (c == '"') {
+            i += 1;
+            while (i < text.len) : (i += 1) {
+                if (text[i] == '\\' and i + 1 < text.len) { i += 1; continue; }
+                if (text[i] == '"') { i += 1; break; }
+            }
+            continue;
+        }
+        // Skip over char literals likewise.
+        if (c == '\'') {
+            i += 1;
+            while (i < text.len and text[i] != '\'') : (i += 1) {
+                if (text[i] == '\\' and i + 1 < text.len) i += 1;
+            }
+            if (i < text.len) i += 1;
+            continue;
+        }
+        // Skip over `//` line comments.
+        if (c == '/' and i + 1 < text.len and text[i + 1] == '/') {
+            while (i < text.len and text[i] != '\n') i += 1;
+            continue;
+        }
+        if (isIdent(c)) {
             const start = i;
             while (i < text.len and isIdent(text[i])) i += 1;
             if (std.mem.eql(u8, text[start..i], name)) return true;
