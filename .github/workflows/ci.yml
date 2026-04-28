@@ -24,22 +24,44 @@ jobs:
         include:
           - os: ubuntu-latest
             zig_arch: x86_64-linux
+            zig_ext: tar.xz
           - os: macos-latest
             zig_arch: aarch64-macos
+            zig_ext: tar.xz
+          - os: windows-latest
+            zig_arch: x86_64-windows
+            zig_ext: zip
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Zig
+      - name: Install Zig (unix)
+        if: runner.os != 'Windows'
         run: |
           set -euo pipefail
-          ZIG_TARBALL="zig-${{ matrix.zig_arch }}-${ZIG_VERSION}.tar.xz"
-          ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TARBALL}"
+          ZIG_NAME="zig-${{ matrix.zig_arch }}-${ZIG_VERSION}"
+          ZIG_ARCHIVE="${ZIG_NAME}.${{ matrix.zig_ext }}"
+          ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/${ZIG_ARCHIVE}"
           echo "Fetching $ZIG_URL"
-          curl -fsSL "$ZIG_URL" -o "$ZIG_TARBALL"
-          tar -xJf "$ZIG_TARBALL"
-          ZIG_DIR="$(pwd)/zig-${{ matrix.zig_arch }}-${ZIG_VERSION}"
+          curl -fsSL "$ZIG_URL" -o "$ZIG_ARCHIVE"
+          tar -xJf "$ZIG_ARCHIVE"
+          ZIG_DIR="$(pwd)/${ZIG_NAME}"
           echo "$ZIG_DIR" >> "$GITHUB_PATH"
           "$ZIG_DIR/zig" version
+
+      - name: Install Zig (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ZigName = "zig-${{ matrix.zig_arch }}-$env:ZIG_VERSION"
+          $ZigArchive = "$ZigName.zip"
+          $ZigUrl = "https://ziglang.org/download/$env:ZIG_VERSION/$ZigArchive"
+          Write-Host "Fetching $ZigUrl"
+          Invoke-WebRequest -Uri $ZigUrl -OutFile $ZigArchive
+          Expand-Archive -Path $ZigArchive -DestinationPath .
+          $ZigDir = Join-Path (Get-Location) $ZigName
+          Add-Content -Path $env:GITHUB_PATH -Value $ZigDir
+          & "$ZigDir\zig.exe" version
 
       - name: zig build
         run: zig build --summary all
