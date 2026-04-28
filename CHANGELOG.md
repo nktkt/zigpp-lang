@@ -4,6 +4,18 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3](https://github.com/nktkt/zigpp-lang/compare/v0.1.2...v0.1.3) (2026-04-28)
+
+
+### CI
+
+* pin all GitHub Action versions to commit SHA ([92e9c52](https://github.com/nktkt/zigpp-lang/commit/92e9c526745d9f3c084ad7f6cb3572dc3217b99b))
+
+
+### Build
+
+* track release-please version and document `zig fetch --save` usage ([e641b89](https://github.com/nktkt/zigpp-lang/commit/e641b897b57f31fb02d3ae759a4980e3321d923c))
+
 ## [0.1.2](https://github.com/nktkt/zigpp-lang/compare/v0.1.1...v0.1.2) (2026-04-28)
 
 
