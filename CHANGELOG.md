@@ -4,6 +4,21 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2](https://github.com/nktkt/zigpp-lang/compare/v0.1.1...v0.1.2) (2026-04-28)
+
+
+### Features
+
+* **repo:** add SECURITY policy, OpenSSF Scorecard, CODEOWNERS, FUNDING ([b5fcbdb](https://github.com/nktkt/zigpp-lang/commit/b5fcbdbba4c0329cfac189c24e69be32025221b8))
+
+
+### CI
+
+* **deps:** Bump github/codeql-action from 3 to 4 ([#8](https://github.com/nktkt/zigpp-lang/issues/8)) ([40a4de7](https://github.com/nktkt/zigpp-lang/commit/40a4de7e1465d0796194cb8ded83b0f6fa3683dd))
+* **deps:** Bump googleapis/release-please-action from 4 to 5 ([#9](https://github.com/nktkt/zigpp-lang/issues/9)) ([ff05f0a](https://github.com/nktkt/zigpp-lang/commit/ff05f0acac529713a6adca3812a64c89fd735c09))
+* **deps:** Bump ossf/scorecard-action from 2.4.0 to 2.4.3 ([#10](https://github.com/nktkt/zigpp-lang/issues/10)) ([73b8f8b](https://github.com/nktkt/zigpp-lang/commit/73b8f8b0d87dfdc1c725ce840f7721b1ef163dad))
+* scope workflow tokens to least privilege ([cf3f4b6](https://github.com/nktkt/zigpp-lang/commit/cf3f4b6a2cf35c59ff7fc4b4be0e320063f02393))
+
 ## [0.1.1](https://github.com/nktkt/zigpp-lang/compare/v0.1.0...v0.1.1) (2026-04-28)
 
 
