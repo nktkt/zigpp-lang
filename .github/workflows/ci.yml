@@ -82,30 +82,90 @@ jobs:
         run: zig build e2e --summary all
 
   fuzz-smoke:
-    name: fuzz (smoke, 2000 iters)
-    runs-on: ubuntu-latest
+    name: fuzz (smoke, 2000 iters, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            zig_arch: x86_64-linux
+            zig_ext: tar.xz
+          - os: macos-latest
+            zig_arch: aarch64-macos
+            zig_ext: tar.xz
+          - os: windows-latest
+            zig_arch: x86_64-windows
+            zig_ext: zip
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Install Zig
+      - name: Install Zig (unix)
+        if: runner.os != 'Windows'
         run: |
           set -euo pipefail
-          ZIG_TARBALL="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
-          ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TARBALL}"
+          ZIG_NAME="zig-${{ matrix.zig_arch }}-${ZIG_VERSION}"
+          ZIG_ARCHIVE="${ZIG_NAME}.${{ matrix.zig_ext }}"
+          ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/${ZIG_ARCHIVE}"
           echo "Fetching $ZIG_URL"
-          curl -fsSL "$ZIG_URL" -o "$ZIG_TARBALL"
-          tar -xJf "$ZIG_TARBALL"
-          ZIG_DIR="$(pwd)/zig-x86_64-linux-${ZIG_VERSION}"
+          curl -fsSL "$ZIG_URL" -o "$ZIG_ARCHIVE"
+          tar -xJf "$ZIG_ARCHIVE"
+          ZIG_DIR="$(pwd)/${ZIG_NAME}"
           echo "$ZIG_DIR" >> "$GITHUB_PATH"
           "$ZIG_DIR/zig" version
 
-      - name: zig build fuzz
+      - name: Install Zig (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ZigName = "zig-${{ matrix.zig_arch }}-$env:ZIG_VERSION"
+          $ZigArchive = "$ZigName.zip"
+          $ZigUrl = "https://ziglang.org/download/$env:ZIG_VERSION/$ZigArchive"
+          Write-Host "Fetching $ZigUrl"
+          Invoke-WebRequest -Uri $ZigUrl -OutFile $ZigArchive
+          Expand-Archive -Path $ZigArchive -DestinationPath .
+          $ZigDir = Join-Path (Get-Location) $ZigName
+          Add-Content -Path $env:GITHUB_PATH -Value $ZigDir
+          & "$ZigDir\zig.exe" version
+
+      - name: zig build fuzz (unix)
+        if: runner.os != 'Windows'
         run: ZPP_FUZZ_ITERS=2000 zig build fuzz --summary all
+
+      - name: zig build fuzz (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:ZPP_FUZZ_ITERS = "2000"
+          zig build fuzz --summary all
 
       - name: Upload crash inputs
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: fuzz-crashes
+          name: fuzz-crashes-${{ matrix.os }}
           path: tests/fuzz/crashes/
           if-no-files-found: ignore
+
+  vscode-extension:
+    name: vscode extension (tsc compile)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vscode
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: vscode/package-lock.json
+
+      - name: npm ci
+        run: npm ci
+
+      - name: tsc compile
+        run: npm run compile
