@@ -378,13 +378,9 @@ fn cmdCheck(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
 }
 
 fn checkPath(allocator: std.mem.Allocator, root: []const u8, any_error: *bool) !void {
-    const stat = std.fs.cwd().statFile(root) catch |e| {
-        ePrint("zpp check: cannot stat '{s}': {s}\n", .{ root, @errorName(e) });
-        any_error.* = true;
-        return;
-    };
-    if (stat.kind == .directory) {
-        var dir = try std.fs.cwd().openDir(root, .{ .iterate = true });
+    // Probe directory first: statFile returns error.IsDir on Windows.
+    if (std.fs.cwd().openDir(root, .{ .iterate = true })) |dir_const| {
+        var dir = dir_const;
         defer dir.close();
         var walker = try dir.walk(allocator);
         defer walker.deinit();
@@ -395,8 +391,14 @@ fn checkPath(allocator: std.mem.Allocator, root: []const u8, any_error: *bool) !
             defer allocator.free(full);
             try checkOneFile(allocator, full, any_error);
         }
-    } else {
+        return;
+    } else |_| {}
+
+    if (std.fs.cwd().statFile(root)) |_| {
         try checkOneFile(allocator, root, any_error);
+    } else |e| {
+        ePrint("zpp check: cannot stat '{s}': {s}\n", .{ root, @errorName(e) });
+        any_error.* = true;
     }
 }
 
