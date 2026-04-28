@@ -31,3 +31,6 @@ tests/fuzz/crashes/
 vscode/node_modules/
 vscode/out/
 vscode/*.vsix
+
+# mdBook build output
+docs/book/

@@ -1,0 +1,18 @@
+[book]
+title = "Zig++ — visible high-level abstractions on top of Zig"
+authors = ["The Zig++ Authors"]
+language = "en"
+src = "src"
+description = "Spec, manifesto, roadmap, and lowering reference for the Zig++ research language."
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/nktkt/zigpp-lang"
+edit-url-template = "https://github.com/nktkt/zigpp-lang/edit/main/docs/{path}"
+site-url = "/zigpp-lang/"
+no-section-label = true
+
+[output.html.fold]
+enable = true
+level = 1
