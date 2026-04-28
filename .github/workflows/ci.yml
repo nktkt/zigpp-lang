@@ -11,6 +11,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  ZIG_VERSION: "0.15.2"
+
 jobs:
   build-test:
     name: build + test (${{ matrix.os }})
@@ -18,14 +21,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            zig_arch: x86_64-linux
+          - os: macos-latest
+            zig_arch: aarch64-macos
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Zig
-        uses: mlugg/setup-zig@v1
-        with:
-          version: 0.15.1
+      - name: Install Zig
+        run: |
+          set -euo pipefail
+          ZIG_TARBALL="zig-${{ matrix.zig_arch }}-${ZIG_VERSION}.tar.xz"
+          ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TARBALL}"
+          echo "Fetching $ZIG_URL"
+          curl -fsSL "$ZIG_URL" -o "$ZIG_TARBALL"
+          tar -xJf "$ZIG_TARBALL"
+          ZIG_DIR="$(pwd)/zig-${{ matrix.zig_arch }}-${ZIG_VERSION}"
+          echo "$ZIG_DIR" >> "$GITHUB_PATH"
+          "$ZIG_DIR/zig" version
 
       - name: zig build
         run: zig build --summary all
@@ -48,15 +62,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Zig
-        uses: mlugg/setup-zig@v1
-        with:
-          version: 0.15.1
+      - name: Install Zig
+        run: |
+          set -euo pipefail
+          ZIG_TARBALL="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TARBALL}"
+          echo "Fetching $ZIG_URL"
+          curl -fsSL "$ZIG_URL" -o "$ZIG_TARBALL"
+          tar -xJf "$ZIG_TARBALL"
+          ZIG_DIR="$(pwd)/zig-x86_64-linux-${ZIG_VERSION}"
+          echo "$ZIG_DIR" >> "$GITHUB_PATH"
+          "$ZIG_DIR/zig" version
 
       - name: zig build fuzz
         run: ZPP_FUZZ_ITERS=2000 zig build fuzz --summary all
-        env:
-          ZPP_FUZZ_ITERS: "2000"
 
       - name: Upload crash inputs
         if: failure()
