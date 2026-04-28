@@ -1,0 +1,29 @@
+# Default owner for everything in the repo.
+# Pull requests automatically request review from listed owners.
+*                       @nktkt
+
+# CI / release infrastructure
+/.github/               @nktkt
+
+# Compiler frontend
+/compiler/              @nktkt
+
+# Runtime library
+/lib/                   @nktkt
+
+# Tooling and CLIs
+/tools/                 @nktkt
+
+# VS Code extension
+/vscode/                @nktkt
+
+# Examples and tests
+/examples/              @nktkt
+/tests/                 @nktkt
+
+# Design and docs
+/MANIFESTO.md           @nktkt
+/LANGUAGE.md            @nktkt
+/ROADMAP.md             @nktkt
+/CHANGELOG.md           @nktkt
+/docs/                  @nktkt
