@@ -4,6 +4,31 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1](https://github.com/nktkt/zigpp-lang/compare/v0.1.0...v0.1.1) (2026-04-28)
+
+
+### Features
+
+* **ci:** add CodeQL security scan and release-please automation ([bc6a260](https://github.com/nktkt/zigpp-lang/commit/bc6a260a6c9f072b8a66a7138977503925f4d599))
+
+
+### Documentation
+
+* auto-enable GitHub Pages on first deploy ([5f3ee71](https://github.com/nktkt/zigpp-lang/commit/5f3ee71af721e63080c56b08b3d6101a80b8d4ee))
+
+
+### CI
+
+* bump actions/configure-pages 5 -&gt; 6 ([719029d](https://github.com/nktkt/zigpp-lang/commit/719029df83e80b27f449818c8c4eb9747ee888bb))
+* **deps:** Bump actions/checkout from 4 to 6 ([#1](https://github.com/nktkt/zigpp-lang/issues/1)) ([15b9dc6](https://github.com/nktkt/zigpp-lang/commit/15b9dc669bc5c03941bddcf323435567f328dad5))
+* **deps:** Bump actions/deploy-pages from 4 to 5 ([#2](https://github.com/nktkt/zigpp-lang/issues/2)) ([e237cbd](https://github.com/nktkt/zigpp-lang/commit/e237cbde0fcb0c522a7ec2d2b659b6afcb2f6d47))
+* **deps:** Bump actions/upload-artifact from 4 to 7 ([#3](https://github.com/nktkt/zigpp-lang/issues/3)) ([4d38520](https://github.com/nktkt/zigpp-lang/commit/4d38520c7986a94261f01d23fad942ece42dfa20))
+* **deps:** Bump actions/upload-pages-artifact from 3 to 5 ([#4](https://github.com/nktkt/zigpp-lang/issues/4)) ([8cd3cef](https://github.com/nktkt/zigpp-lang/commit/8cd3cefcc609315c307c0779fb5943126360d49b))
+* fix snapshot tests on Windows (CRLF normalization) ([56519b9](https://github.com/nktkt/zigpp-lang/commit/56519b94f5708a3cb810a22eefccc18e640ed5fc))
+* handle Windows path separators and refresh stale snapshots ([4107369](https://github.com/nktkt/zigpp-lang/commit/4107369f77a52303d233c9617090bc7f22df72e4))
+* install Zig manually from ziglang.org with correct arch-os naming ([f07db58](https://github.com/nktkt/zigpp-lang/commit/f07db585f4ac0b9d51885c8a24275126b22a3751))
+* pin Zig to 0.15.1 (0.15.2 is Homebrew-only, not on mirrors) ([07ae56b](https://github.com/nktkt/zigpp-lang/commit/07ae56b20ade1050f2deca7288ee42abf29f60b0))
+
 ## [Unreleased]
 
 ### Added
