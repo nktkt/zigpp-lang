@@ -6,6 +6,7 @@
 
 - [Manifesto](./manifesto.md)
 - [Roadmap](./roadmap.md)
+- [v0.2 plan (draft)](./v0.2-plan.md)
 
 # Reference
 
@@ -24,5 +25,6 @@
 
 # Project
 
+- [Performance](./perf.md)
 - [Contributing](./contributing.md)
 - [Changelog](./changelog.md)

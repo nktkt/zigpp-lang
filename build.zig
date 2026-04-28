@@ -107,6 +107,31 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| fuzz_run.addArgs(args);
     const fuzz_step = b.step("fuzz", "Run the zpp fuzz harness (set ZPP_FUZZ_ITERS=N, --seed=N for repro)");
     fuzz_step.dependOn(&fuzz_run.step);
+
+    // Benchmark: compileToString throughput across input sizes.
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("bench/bench.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    bench_mod.addImport("zpp", zpp_module);
+    bench_mod.addImport("zpp_compiler", zpp_compiler_module);
+    const bench_exe = b.addExecutable(.{
+        .name = "zpp-bench",
+        .root_module = bench_mod,
+    });
+    const bench_run = b.addRunArtifact(bench_exe);
+    const bench_step = b.step("bench", "Run lowering microbenchmarks (ReleaseFast)");
+    bench_step.dependOn(&bench_run.step);
+
+    // Umbrella step: run everything that should be green before pushing.
+    const all_step = b.step("all", "Run build + test + check + examples + e2e + bench (no fuzz)");
+    all_step.dependOn(b.getInstallStep());
+    all_step.dependOn(test_step);
+    all_step.dependOn(check_step);
+    all_step.dependOn(examples_step);
+    all_step.dependOn(e2e_step);
+    all_step.dependOn(bench_step);
 }
 
 fn addTestsForTree(
