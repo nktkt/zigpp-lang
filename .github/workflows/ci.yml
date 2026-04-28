@@ -81,6 +81,46 @@ jobs:
       - name: zig build e2e
         run: zig build e2e --summary all
 
+      - name: zpp init scaffolds a working project (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZPP="$PWD/zig-out/bin/zpp"
+          tmp=$(mktemp -d)
+          pushd "$tmp" >/dev/null
+          "$ZPP" init scaffold-test
+          cd scaffold-test
+          test -f build.zig
+          test -f build.zig.zon
+          test -f src/main.zpp
+          test -f .gitignore
+          test -f README.md
+          # Placeholder substitution actually happened.
+          grep -q '\.name = \.scaffold-test' build.zig.zon
+          ! grep -q ZPP_PROJECT_NAME build.zig.zon
+          ! grep -q ZPP_PROJECT_FINGERPRINT build.zig.zon
+          # The starter program lowers cleanly through the same compiler.
+          "$ZPP" check src/main.zpp
+          popd >/dev/null
+
+      - name: zpp init scaffolds a working project (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zpp = Join-Path $env:GITHUB_WORKSPACE "zig-out\bin\zpp.exe"
+          $tmp = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP "scaffold-parent") -Force
+          Push-Location $tmp.FullName
+          & $zpp init scaffold-test
+          if (-not (Test-Path "scaffold-test\build.zig")) { throw "build.zig missing" }
+          if (-not (Test-Path "scaffold-test\src\main.zpp")) { throw "main.zpp missing" }
+          $manifest = Get-Content "scaffold-test\build.zig.zon" -Raw
+          if ($manifest -match "ZPP_PROJECT_NAME") { throw "placeholder still present" }
+          if ($manifest -notmatch "scaffold-test") { throw "name not substituted" }
+          & $zpp check "scaffold-test\src\main.zpp"
+          Pop-Location
+
   fuzz-smoke:
     name: fuzz (smoke, 2000 iters, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}

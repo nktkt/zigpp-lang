@@ -40,6 +40,10 @@ zig build
 # Hello, Ada!
 ```
 
+**New here?** Walk through the [10-minute tutorial](./tutorial.md)
+that scaffolds a real project, modifies it, and exercises every
+major construct.
+
 ## What this site contains
 
 - [Manifesto](./manifesto.md) — the design philosophy and what we

@@ -1,6 +1,7 @@
 # Summary
 
 [Introduction](./introduction.md)
+[Tutorial — first 10 minutes](./tutorial.md)
 
 # Concepts
 
