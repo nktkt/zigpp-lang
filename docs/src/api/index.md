@@ -22,3 +22,4 @@ zig build
 - [derive_user](./derive_user.md) — `derive(.{ Hash, Eq, Debug })`
 - [effects_pure](./effects_pure.md) — `effects(.noalloc, .noio)` annotations
 - [async_group](./async_group.md) — `zpp.async_mod.TaskGroup`
+- [event_bus](./event_bus.md) — integration showcase combining all features

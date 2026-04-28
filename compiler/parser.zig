@@ -472,13 +472,16 @@ pub const Parser = struct {
             _ = self.advance();
         }
         const close = try self.expect(.r_brace, "const struct close }");
+        // Check for `derive(...)` BEFORE the optional trailing semicolon so
+        // both `} derive(...);` and `}; derive(...);` are accepted.
+        const derive_attr = try self.parseTrailingDerive();
         _ = self.match(.semicolon);
         return .{
             .name = name_tok.slice(self.source),
             .is_pub = is_pub,
             .fields_text = self.source[body_start..body_end],
             .fns = &.{},
-            .derive = null,
+            .derive = derive_attr,
             .span = .{ .start = start, .end = close.span.end },
         };
     }

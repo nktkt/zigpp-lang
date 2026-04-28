@@ -9,6 +9,8 @@
 
 📖 **Docs site**: https://nktkt.github.io/zigpp-lang/
 
+🌐 English | [日本語](README.ja.md)
+
 Visible high-level abstractions on top of Zig.
 
 Zig++ is a research language layered on top of Zig 0.15+. It adds named

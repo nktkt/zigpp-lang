@@ -115,3 +115,19 @@ calls anything that allocates).
 `zpp.async_mod.TaskGroup` is the MVP serial executor — `spawn`
 schedules, `join` runs to completion. Every primitive is explicit;
 there is no implicit await.
+
+## event_bus.zpp — integration showcase
+
+The other 8 examples each demonstrate one feature in isolation.
+`event_bus.zpp` shows them composing: a `trait Handler` with two
+`impl`s, a `derive(.{ Hash, Eq })` `Event` payload, an `owned struct
+EventBus` scoped with `using`, a `dyn Handler` slice, and a
+`requires(...)` contract on `publish`.
+
+```zig
+{{#include ../../examples/event_bus.zpp}}
+```
+
+```text
+{{#include ./output/event_bus.txt}}
+```

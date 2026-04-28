@@ -1,5 +1,8 @@
 # Contributing to Zig++
 
+🌐 English | [日本語](CONTRIBUTING.ja.md)
+
+
 Thanks for your interest. Zig++ is a research project; the focus is on
 keeping the language surface small and the implementation honest about
 costs. This guide covers the basics for contributing code, bug reports,

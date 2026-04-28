@@ -1,0 +1,110 @@
+/// event_bus.zpp — small in-process event bus that combines every Zig++
+/// feature in one program: a `trait Handler`, two `impl`s, an `owned struct`
+/// `EventBus` with `using`-managed cleanup, `dyn` slice for the handler
+/// chain, contracts on `publish`, and `derive(.{ Hash, Eq })` on the event
+/// payload.
+///
+/// Teaches: how the constructs compose. The bus owns its handler vector,
+/// each `Event` is a derived struct (so we can hash it), `dispatch` is a
+/// guarded entry point (`requires(name.len > 0)`).
+///
+/// Lowered Zig sketch (abbreviated):
+///     const Handler_VTable = struct { handle: *const fn(*anyopaque, Event) void };
+///     const EventBus = struct {
+///         handlers: std.ArrayList(zpp.Dyn(Handler_VTable)),
+///         allocator: std.mem.Allocator,
+///         pub fn deinit(self: *EventBus) void { ... }
+///         pub fn publish(self: *EventBus, e: Event) void { ... }
+///     };
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+trait Handler {
+    fn handle(self, event: Event) void;
+}
+
+const Event = struct {
+    name: []const u8,
+    payload: u32,
+} derive(.{ Hash, Eq });
+
+const Logger = struct {
+    label: []const u8,
+};
+
+impl Handler for Logger {
+    fn handle(self, event: Event) void {
+        std.debug.print("[{s}] {s}={d} (hash={x})\n", .{
+            self.label,
+            event.name,
+            event.payload,
+            event.hash(),
+        });
+    }
+}
+
+const Counter = struct {
+    seen: *u32,
+};
+
+impl Handler for Counter {
+    fn handle(self, event: Event) void {
+        _ = event;
+        self.seen.* += 1;
+    }
+}
+
+owned struct EventBus {
+    handlers: std.ArrayList(zpp.Dyn(Handler_VTable)),
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) EventBus {
+        return .{
+            .handlers = .{},
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *EventBus) void {
+        self.handlers.deinit(self.allocator);
+    }
+
+    pub fn subscribe(self: *EventBus, handler: zpp.Dyn(Handler_VTable)) !void {
+        try self.handlers.append(self.allocator, handler);
+    }
+
+    pub fn publish(self: *EventBus, event: Event) void
+        requires(event.name.len > 0)
+    {
+        for (self.handlers.items) |h| {
+            h.vtable.handle(h.ptr, event);
+        }
+    }
+}
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    using bus = EventBus.init(allocator);
+
+    var logger_a = Logger{ .label = "stdout" };
+    var logger_b = Logger{ .label = "audit" };
+    var seen: u32 = 0;
+    var counter = Counter{ .seen = &seen };
+
+    try bus.subscribe(zpp.Dyn(Handler_VTable).init(Logger, &logger_a, &Handler_impl_for_Logger));
+    try bus.subscribe(zpp.Dyn(Handler_VTable).init(Logger, &logger_b, &Handler_impl_for_Logger));
+    try bus.subscribe(zpp.Dyn(Handler_VTable).init(Counter, &counter, &Handler_impl_for_Counter));
+
+    bus.publish(.{ .name = "login", .payload = 42 });
+    bus.publish(.{ .name = "logout", .payload = 7 });
+
+    std.debug.print("counter saw {d} events\n", .{seen});
+    std.debug.print("Event.eq(login, login) = {}\n", .{
+        Event.eq(.{ .name = "login", .payload = 42 }, .{ .name = "login", .payload = 42 }),
+    });
+    std.debug.print("(combined: trait+impl+dyn+owned+using+derive+contracts)\n", .{});
+}

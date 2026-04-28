@@ -1,0 +1,7 @@
+[stdout] login=42 (hash=d1f43a115b34e3e9)
+[audit] login=42 (hash=d1f43a115b34e3e9)
+[stdout] logout=7 (hash=d20078bd39549c1d)
+[audit] logout=7 (hash=d20078bd39549c1d)
+counter saw 2 events
+Event.eq(login, login) = true
+(combined: trait+impl+dyn+owned+using+derive+contracts)
