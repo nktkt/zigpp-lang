@@ -7,11 +7,21 @@ const Greeter_VTable = struct {
 };
 const Greeter = zpp.Dyn(Greeter_VTable);
 
-struct Hello {}
+const Hello = struct {
+    pub fn greet(self: *@This()) []const u8 {
+        _ = self;
+        return "hello";
+    }
+};
+
 // impl Greeter for Hello
+fn Greeter_method_greet_Hello(self: *Hello) []const u8 {
+    _ = self;
+    return "hello";
+}
 fn Greeter_greet_for_Hello(ptr: *anyopaque) []const u8 {
     const self: *Hello = @ptrCast(@alignCast(ptr));
-    return Hello.greet(self);
+    return Greeter_method_greet_Hello(self);
 }
 pub const Greeter_impl_for_Hello: Greeter_VTable = .{
     .greet = Greeter_greet_for_Hello,
