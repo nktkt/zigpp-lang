@@ -1,0 +1,22 @@
+# Default: treat all text as LF in the repo so snapshot tests are stable
+# across platforms. Windows checkouts will get LF line endings.
+* text=auto eol=lf
+
+# Source: always LF
+*.zig    text eol=lf
+*.zpp    text eol=lf
+*.zon    text eol=lf
+*.md     text eol=lf
+*.json   text eol=lf
+*.ts     text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+
+# Binaries: never touch
+*.png    binary
+*.jpg    binary
+*.gif    binary
+*.ico    binary
+*.tar.xz binary
+*.zip    binary
+*.vsix   binary

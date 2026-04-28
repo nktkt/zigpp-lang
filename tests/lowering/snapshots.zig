@@ -43,9 +43,20 @@ fn runOne(allocator: std.mem.Allocator, name: []const u8) !void {
     const expected = try readFile(allocator, snap_path);
     defer allocator.free(expected);
 
-    const got = std.mem.trimRight(u8, lowered, " \t\n\r");
-    const want = std.mem.trimRight(u8, expected, " \t\n\r");
-    try std.testing.expectEqualStrings(want, got);
+    // Normalize line endings so the test passes on Windows checkouts even
+    // if .gitattributes was missed.
+    const got_norm = try stripCr(allocator, std.mem.trimRight(u8, lowered, " \t\n\r"));
+    defer allocator.free(got_norm);
+    const want_norm = try stripCr(allocator, std.mem.trimRight(u8, expected, " \t\n\r"));
+    defer allocator.free(want_norm);
+    try std.testing.expectEqualStrings(want_norm, got_norm);
+}
+
+fn stripCr(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(allocator);
+    for (text) |c| if (c != '\r') try out.append(allocator, c);
+    return out.toOwnedSlice(allocator);
 }
 
 test "snapshot: hello_using" {
