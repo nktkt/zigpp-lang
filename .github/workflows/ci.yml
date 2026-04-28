@@ -32,7 +32,7 @@ jobs:
             zig_arch: x86_64-windows
             zig_ext: zip
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Zig (unix)
         if: runner.os != 'Windows'
@@ -82,7 +82,7 @@ jobs:
     name: fuzz (smoke, 2000 iters)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Zig
         run: |
