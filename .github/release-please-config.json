@@ -21,7 +21,13 @@
   ],
   "packages": {
     ".": {
-      "package-name": "zigpp"
+      "package-name": "zigpp",
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "build.zig.zon"
+        }
+      ]
     }
   }
 }

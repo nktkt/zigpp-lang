@@ -1,6 +1,8 @@
 .{
     .name = .zigpp,
-    .version = "0.1.0",
+    // x-release-please-start-version
+    .version = "0.1.2",
+    // x-release-please-end
     .fingerprint = 0x1cc6295c7ec7e5e,
     .minimum_zig_version = "0.15.0",
     .paths = .{
@@ -11,6 +13,8 @@
         "tools",
         "examples",
         "tests",
+        "LICENSE",
+        "README.md",
     },
     .dependencies = .{},
 }

@@ -125,6 +125,29 @@ zpp-doc        markdown doc generator
 zpp-migrate    .zig -> .zpp migration helper
 ```
 
+## Use as a Zig dependency
+
+To consume the `zpp` runtime library from your own Zig project:
+
+```sh
+zig fetch --save git+https://github.com/nktkt/zigpp-lang
+```
+
+Then in your `build.zig`:
+
+```zig
+const zpp_dep = b.dependency("zigpp", .{
+    .target = target,
+    .optimize = optimize,
+});
+exe.root_module.addImport("zpp", zpp_dep.module("zpp"));
+```
+
+The runtime exposes `Dyn`, `Owned`, `ArenaScope`, `contract.requires`,
+`derive.Hash/Eq/Debug/Json`, and the async `TaskGroup` scaffold. The
+compiler frontend is also importable as `zpp_compiler` if you need to
+embed the lowering pipeline programmatically.
+
 ## Editor support
 
 Install the VS Code extension from the `vscode/` directory:
