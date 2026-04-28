@@ -4,6 +4,13 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8](https://github.com/nktkt/zigpp-lang/compare/v0.1.7...v0.1.8) (2026-04-28)
+
+
+### Features
+
+* zpp init scaffold + derive Clone/Default/Ord ([d70f22c](https://github.com/nktkt/zigpp-lang/commit/d70f22c622701867ca25649cf58bc909eddf5a30))
+
 ## [0.1.7](https://github.com/nktkt/zigpp-lang/compare/v0.1.6...v0.1.7) (2026-04-28)
 
 
