@@ -25,7 +25,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v1
         with:
-          version: 0.15.2
+          version: 0.15.1
 
       - name: zig build
         run: zig build --summary all
@@ -51,7 +51,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v1
         with:
-          version: 0.15.2
+          version: 0.15.1
 
       - name: zig build fuzz
         run: ZPP_FUZZ_ITERS=2000 zig build fuzz --summary all
