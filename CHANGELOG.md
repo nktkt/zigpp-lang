@@ -4,6 +4,13 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6](https://github.com/nktkt/zigpp-lang/compare/v0.1.5...v0.1.6) (2026-04-28)
+
+
+### Features
+
+* Japanese localization + integration example "event_bus" ([9bdde76](https://github.com/nktkt/zigpp-lang/commit/9bdde76a1707f8ab1b1442feff576252a2eb0b7d))
+
 ## [0.1.5](https://github.com/nktkt/zigpp-lang/compare/v0.1.4...v0.1.5) (2026-04-28)
 
 
