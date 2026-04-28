@@ -1,5 +1,9 @@
 # Zig++
 
+[![CI](https://github.com/nktkt/zigpp-lang/actions/workflows/ci.yml/badge.svg)](https://github.com/nktkt/zigpp-lang/actions/workflows/ci.yml)
+[![Zig 0.15+](https://img.shields.io/badge/zig-0.15%2B-orange)](https://ziglang.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 Visible high-level abstractions on top of Zig.
 
 Zig++ is a research language layered on top of Zig 0.15+. It adds named

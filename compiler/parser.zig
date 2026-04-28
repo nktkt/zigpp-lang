@@ -681,9 +681,7 @@ pub const Parser = struct {
             }
         }
 
-        var sig_end: u32 = if (ret.len == 0) name.span.end else @intCast(@intFromPtr(ret.ptr) - @intFromPtr(self.source.ptr) + ret.len);
-        // sig_end fixup: prefer the position of the next token.
-        sig_end = self.peek().span.start;
+        const sig_end: u32 = self.peek().span.start;
 
         const sig: ast.FnSig = .{
             .name = name.slice(self.source),
