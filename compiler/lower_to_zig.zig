@@ -266,6 +266,15 @@ pub const Lowerer = struct {
             } else if (std.mem.eql(u8, n, "Eq")) {
                 try self.writeIndent(4);
                 try self.write("pub fn eq(self: @This(), other: @This()) bool { return zpp.derive.Eq(@This()).eq(self, other); }\n");
+            } else if (std.mem.eql(u8, n, "Ord")) {
+                try self.writeIndent(4);
+                try self.write("pub fn cmp(self: @This(), other: @This()) i32 { return zpp.derive.Ord(@This()).cmp(self, other); }\n");
+            } else if (std.mem.eql(u8, n, "Default")) {
+                try self.writeIndent(4);
+                try self.write("pub fn default() @This() { return zpp.derive.Default(@This()).default(); }\n");
+            } else if (std.mem.eql(u8, n, "Clone")) {
+                try self.writeIndent(4);
+                try self.write("pub fn clone(self: @This(), allocator: std.mem.Allocator) !@This() { return zpp.derive.Clone(@This()).clone(self, allocator); }\n");
             } else if (std.mem.eql(u8, n, "Debug")) {
                 try self.writeIndent(4);
                 try self.write("pub const debug = zpp.derive.Debug(@This());\n");

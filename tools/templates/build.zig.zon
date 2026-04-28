@@ -1,0 +1,20 @@
+.{
+    .name = .ZPP_PROJECT_NAME,
+    .version = "0.1.0",
+    .fingerprint = 0xZPP_PROJECT_FINGERPRINT,
+    .minimum_zig_version = "0.15.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+    },
+    .dependencies = .{
+        .zigpp = .{
+            .url = "git+https://github.com/nktkt/zigpp-lang",
+            // Run `zig fetch --save git+https://github.com/nktkt/zigpp-lang`
+            // to populate the hash. The first build will tell you what to
+            // paste here.
+        },
+    },
+}

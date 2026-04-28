@@ -1,0 +1,25 @@
+const std = @import("std");
+const zpp = @import("zpp");
+
+trait Greeter {
+    fn greet(self) void;
+}
+
+const Friendly = struct {
+    name: []const u8,
+};
+
+impl Greeter for Friendly {
+    fn greet(self) void {
+        std.debug.print("hello from zpp, {s}!\n", .{self.name});
+    }
+}
+
+fn welcome(who: impl Greeter) void {
+    who.greet();
+}
+
+pub fn main() !void {
+    var f = Friendly{ .name = "world" };
+    welcome(&f);
+}

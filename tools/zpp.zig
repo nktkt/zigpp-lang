@@ -23,6 +23,7 @@ const Subcommand = enum {
     doc,
     migrate,
     lsp,
+    init,
     version,
     help,
 
@@ -36,6 +37,7 @@ const Subcommand = enum {
             .{ "doc", .doc },
             .{ "migrate", .migrate },
             .{ "lsp", .lsp },
+            .{ "init", .init },
             .{ "version", .version },
             .{ "--version", .version },
             .{ "-V", .version },
@@ -117,6 +119,7 @@ pub fn run(allocator: std.mem.Allocator, argv: [][:0]u8) !ExitCode {
         .doc => cmdDoc(allocator, rest),
         .migrate => cmdMigrate(allocator, rest),
         .lsp => cmdLsp(allocator, rest),
+        .init => cmdInit(allocator, rest),
         .version => cmdVersion(),
         .help => cmdHelp(rest),
     };
@@ -138,6 +141,7 @@ fn printUsage() void {
         \\    doc [paths...]       generate markdown docs from .zpp doc comments
         \\    migrate <file.zig>   suggest .zpp rewrites for a .zig file
         \\    lsp                  start LSP server on stdin/stdout
+        \\    init <name>          scaffold a new Zig++ project under <name>/
         \\    version              print version
         \\    help [subcommand]    show this help (or details for a subcommand)
         \\
@@ -168,6 +172,7 @@ fn cmdHelp(args: [][:0]u8) !ExitCode {
         .doc => "zpp doc [paths...]\n  Walk .zpp files and emit Markdown for trait/fn/struct/extern interface decls.\n",
         .migrate => "zpp migrate <file.zig>\n  Diff suggestions to convert defer/init/deinit patterns to Zig++.\n",
         .lsp => "zpp lsp\n  Speak LSP over stdio. Run from your editor; not for human use.\n",
+        .init => "zpp init <name>\n  Scaffold a new Zig++ project under <name>/ with build.zig, build.zig.zon, src/main.zpp, and a starter README. Refuses to overwrite an existing directory.\n",
         .version => "zpp version\n  Print compiler version.\n",
         .help => "zpp help [subcommand]\n  Show this message.\n",
     };
@@ -441,6 +446,105 @@ fn cmdLsp(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
     return lsp.runServer(allocator);
 }
 
+const tpl_main_zpp = @embedFile("templates/main.zpp");
+const tpl_build_zig = @embedFile("templates/build.zig");
+const tpl_build_zon = @embedFile("templates/build.zig.zon");
+const tpl_gitignore = @embedFile("templates/gitignore");
+const tpl_readme_md = @embedFile("templates/README.md");
+
+const TemplateFile = struct { rel_path: []const u8, contents: []const u8 };
+
+fn cmdInit(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
+    if (args.len != 1) {
+        ePrint("zpp init: expected exactly one project name\n", .{});
+        return .usage_error;
+    }
+    const name = args[0];
+    if (!isValidProjectName(name)) {
+        ePrint("zpp init: '{s}' is not a valid project name (must match [A-Za-z][A-Za-z0-9_-]*)\n", .{name});
+        return .user_error;
+    }
+
+    // Refuse to clobber an existing directory.
+    if (std.fs.cwd().access(name, .{})) |_| {
+        ePrint("zpp init: '{s}' already exists; refusing to overwrite\n", .{name});
+        return .user_error;
+    } else |_| {}
+
+    try std.fs.cwd().makePath(name);
+    var dir = try std.fs.cwd().openDir(name, .{});
+    defer dir.close();
+    try dir.makePath("src");
+
+    // Pick a fingerprint deterministic per project name. The fingerprint is
+    // free-form for unpublished packages; we just need a stable nonzero u64.
+    // Stable per project-name fingerprint. The seed is the ASCII bytes of "zpp.init".
+    const fp = std.hash.Wyhash.hash(0x7a70_702e_696e_6974, name);
+    const fp_hex = try std.fmt.allocPrint(allocator, "{x}", .{fp});
+    defer allocator.free(fp_hex);
+
+    const files = [_]TemplateFile{
+        .{ .rel_path = "src/main.zpp", .contents = tpl_main_zpp },
+        .{ .rel_path = "build.zig", .contents = tpl_build_zig },
+        .{ .rel_path = "build.zig.zon", .contents = tpl_build_zon },
+        .{ .rel_path = ".gitignore", .contents = tpl_gitignore },
+        .{ .rel_path = "README.md", .contents = tpl_readme_md },
+    };
+
+    for (files) |f| {
+        const rendered = try renderTemplate(allocator, f.contents, name, fp_hex);
+        defer allocator.free(rendered);
+        try dir.writeFile(.{ .sub_path = f.rel_path, .data = rendered });
+    }
+
+    oPrint(
+        \\Scaffolded '{s}/'.
+        \\
+        \\Next steps:
+        \\    cd {s}
+        \\    zig fetch --save git+https://github.com/nktkt/zigpp-lang
+        \\    zig build run
+        \\
+    , .{ name, name });
+    return .ok;
+}
+
+fn isValidProjectName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    const c0 = name[0];
+    if (!std.ascii.isAlphabetic(c0)) return false;
+    for (name[1..]) |c| {
+        if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '-')) return false;
+    }
+    return true;
+}
+
+fn renderTemplate(allocator: std.mem.Allocator, src: []const u8, name: []const u8, fp_hex: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < src.len) {
+        if (substrAt(src, i, "ZPP_PROJECT_NAME")) {
+            try out.appendSlice(allocator, name);
+            i += "ZPP_PROJECT_NAME".len;
+            continue;
+        }
+        if (substrAt(src, i, "ZPP_PROJECT_FINGERPRINT")) {
+            try out.appendSlice(allocator, fp_hex);
+            i += "ZPP_PROJECT_FINGERPRINT".len;
+            continue;
+        }
+        try out.append(allocator, src[i]);
+        i += 1;
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn substrAt(haystack: []const u8, at: usize, needle: []const u8) bool {
+    if (at + needle.len > haystack.len) return false;
+    return std.mem.eql(u8, haystack[at .. at + needle.len], needle);
+}
+
 fn termToExit(term: std.process.Child.Term) ExitCode {
     return switch (term) {
         .Exited => |c| if (c == 0) ExitCode.ok else ExitCode.user_error,
@@ -486,4 +590,24 @@ test "stemOf and replaceExt" {
     const r = try replaceExt(a, "x/y/z.zpp", ".zig");
     defer a.free(r);
     try std.testing.expectEqualStrings("x/y/z.zig", r);
+}
+
+test "isValidProjectName accepts identifiers and rejects edge cases" {
+    try std.testing.expect(isValidProjectName("hello"));
+    try std.testing.expect(isValidProjectName("my_project"));
+    try std.testing.expect(isValidProjectName("my-project"));
+    try std.testing.expect(isValidProjectName("ab9"));
+    try std.testing.expect(!isValidProjectName(""));
+    try std.testing.expect(!isValidProjectName("9hello"));
+    try std.testing.expect(!isValidProjectName("foo/bar"));
+    try std.testing.expect(!isValidProjectName("foo bar"));
+    try std.testing.expect(!isValidProjectName("foo.bar"));
+}
+
+test "renderTemplate substitutes both placeholders" {
+    const a = std.testing.allocator;
+    const tpl = "name=ZPP_PROJECT_NAME, fp=0xZPP_PROJECT_FINGERPRINT;";
+    const out = try renderTemplate(a, tpl, "demo", "deadbeef");
+    defer a.free(out);
+    try std.testing.expectEqualStrings("name=demo, fp=0xdeadbeef;", out);
 }

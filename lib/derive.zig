@@ -158,6 +158,123 @@ pub fn Eq(comptime T: type) type {
     };
 }
 
+pub fn Default(comptime T: type) type {
+    ensureStruct(T, "Default");
+    return struct {
+        /// Returns the zero value of T (all fields set to their type's zero).
+        /// Matches `std.mem.zeroes(T)` semantics; for fields with explicit
+        /// default values in the struct decl, those defaults win.
+        pub fn default() T {
+            return std.mem.zeroInit(T, .{});
+        }
+    };
+}
+
+pub fn Ord(comptime T: type) type {
+    ensureStruct(T, "Ord");
+    return struct {
+        /// Lexicographic field-by-field comparison. Returns -1 / 0 / +1.
+        /// Strings (`[]const u8`) compare via std.mem.order; pointers compare
+        /// by address; nested structs recurse.
+        pub fn cmp(self: T, other: T) i32 {
+            return cmpValue(self, other);
+        }
+
+        fn cmpValue(a: anytype, b: anytype) i32 {
+            const V = @TypeOf(a);
+            const info = @typeInfo(V);
+            switch (info) {
+                .int, .comptime_int => {
+                    if (a < b) return -1;
+                    if (a > b) return 1;
+                    return 0;
+                },
+                .float, .comptime_float => {
+                    if (a < b) return -1;
+                    if (a > b) return 1;
+                    return 0;
+                },
+                .bool => {
+                    if (@intFromBool(a) < @intFromBool(b)) return -1;
+                    if (@intFromBool(a) > @intFromBool(b)) return 1;
+                    return 0;
+                },
+                .@"enum" => return cmpValue(@intFromEnum(a), @intFromEnum(b)),
+                .pointer => |p| switch (p.size) {
+                    .slice => if (p.child == u8) {
+                        return switch (std.mem.order(u8, a, b)) {
+                            .lt => -1,
+                            .eq => 0,
+                            .gt => 1,
+                        };
+                    } else {
+                        const min_len = @min(a.len, b.len);
+                        var i: usize = 0;
+                        while (i < min_len) : (i += 1) {
+                            const c = cmpValue(a[i], b[i]);
+                            if (c != 0) return c;
+                        }
+                        if (a.len < b.len) return -1;
+                        if (a.len > b.len) return 1;
+                        return 0;
+                    },
+                    else => return cmpValue(@intFromPtr(a), @intFromPtr(b)),
+                },
+                .@"struct" => |s| {
+                    inline for (s.fields) |f| {
+                        const c = cmpValue(@field(a, f.name), @field(b, f.name));
+                        if (c != 0) return c;
+                    }
+                    return 0;
+                },
+                else => return 0,
+            }
+        }
+    };
+}
+
+pub fn Clone(comptime T: type) type {
+    ensureStruct(T, "Clone");
+    return struct {
+        /// Deep clone using `allocator`. Slices and arrays are duplicated;
+        /// scalar fields are bit-copied. Use an arena to free everything in
+        /// one shot.
+        pub fn clone(self: T, allocator: Allocator) Allocator.Error!T {
+            return cloneValue(T, self, allocator);
+        }
+
+        fn cloneValue(comptime V: type, value: V, allocator: Allocator) Allocator.Error!V {
+            const info = @typeInfo(V);
+            return switch (info) {
+                .int, .float, .bool, .@"enum", .void => value,
+                .optional => |opt| if (value) |v| (try cloneValue(opt.child, v, allocator)) else null,
+                .pointer => |p| switch (p.size) {
+                    .slice => blk: {
+                        const dup = try allocator.alloc(p.child, value.len);
+                        errdefer allocator.free(dup);
+                        for (value, 0..) |x, i| dup[i] = try cloneValue(p.child, x, allocator);
+                        break :blk dup;
+                    },
+                    else => value,
+                },
+                .array => |arr| blk: {
+                    var out: [arr.len]arr.child = undefined;
+                    for (value, 0..) |x, i| out[i] = try cloneValue(arr.child, x, allocator);
+                    break :blk out;
+                },
+                .@"struct" => |s| blk: {
+                    var out: V = undefined;
+                    inline for (s.fields) |f| {
+                        @field(out, f.name) = try cloneValue(f.type, @field(value, f.name), allocator);
+                    }
+                    break :blk out;
+                },
+                else => value,
+            };
+        }
+    };
+}
+
 pub fn Json(comptime T: type) type {
     ensureStruct(T, "Json");
     return struct {
@@ -203,6 +320,37 @@ test "Eq compares all fields" {
     const c = Point{ .x = 1, .y = 3 };
     try std.testing.expect(Point.eq(a, b));
     try std.testing.expect(!Point.eq(a, c));
+}
+
+test "Default returns the zero value" {
+    const a = Default(Point).default();
+    try std.testing.expectEqual(@as(i32, 0), a.x);
+    try std.testing.expectEqual(@as(i32, 0), a.y);
+}
+
+test "Ord lexicographic field comparison" {
+    const a = Point{ .x = 1, .y = 2 };
+    const b = Point{ .x = 1, .y = 3 };
+    const c = Point{ .x = 2, .y = 0 };
+    try std.testing.expectEqual(@as(i32, 0), Ord(Point).cmp(a, a));
+    try std.testing.expectEqual(@as(i32, -1), Ord(Point).cmp(a, b));
+    try std.testing.expectEqual(@as(i32, 1), Ord(Point).cmp(b, a));
+    try std.testing.expectEqual(@as(i32, -1), Ord(Point).cmp(a, c));
+}
+
+test "Clone duplicates struct with slice field" {
+    const Owned = struct {
+        id: u32,
+        name: []const u8,
+    };
+    const a = std.testing.allocator;
+    const v = Owned{ .id = 7, .name = "ada" };
+    const c = try Clone(Owned).clone(v, a);
+    defer a.free(c.name);
+    try std.testing.expectEqual(v.id, c.id);
+    try std.testing.expectEqualStrings(v.name, c.name);
+    // The clone owns its own copy of `name`.
+    try std.testing.expect(v.name.ptr != c.name.ptr);
 }
 
 test "Json round-trips a flat struct" {

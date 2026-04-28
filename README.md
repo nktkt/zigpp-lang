@@ -127,6 +127,21 @@ zpp-doc        markdown doc generator
 zpp-migrate    .zig -> .zpp migration helper
 ```
 
+## Start a new project
+
+The CLI ships a template generator:
+
+```sh
+zpp init my-project
+cd my-project
+zig fetch --save git+https://github.com/nktkt/zigpp-lang
+zig build run
+```
+
+This scaffolds `build.zig`, `build.zig.zon`, `src/main.zpp`, a
+`.gitignore`, and a starter README — enough to lower, build, and run
+without copy-pasting the boilerplate.
+
 ## Use as a Zig dependency
 
 To consume the `zpp` runtime library from your own Zig project:

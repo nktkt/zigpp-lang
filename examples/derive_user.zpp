@@ -22,7 +22,7 @@ const zpp = @import("zpp");
 struct User {
     id: u64,
     name: []const u8,
-} derive(.{ Hash, Debug, Eq });
+} derive(.{ Hash, Debug, Eq, Ord, Default });
 
 pub fn main() !void {
     const a = User{ .id = 1, .name = "ada" };
@@ -33,6 +33,8 @@ pub fn main() !void {
     std.debug.print("c.hash() = {x}\n", .{c.hash()});
     std.debug.print("User.eq(a, b) = {}\n", .{User.eq(a, b)});
     std.debug.print("User.eq(a, c) = {}\n", .{User.eq(a, c)});
+    std.debug.print("a.cmp(c)      = {d}\n", .{a.cmp(c)});
+    std.debug.print("default       = User{{ .id = {d}, .name = \"{s}\" }}\n", .{ User.default().id, User.default().name });
 
     var buf: [128]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
