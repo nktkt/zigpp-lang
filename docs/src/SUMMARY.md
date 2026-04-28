@@ -11,6 +11,15 @@
 
 - [Language spec](./language.md)
 - [Examples](./examples.md)
+- [API reference](./api/index.md)
+  - [hello_trait](./api/hello_trait.md)
+  - [owned_file](./api/owned_file.md)
+  - [dyn_plugin](./api/dyn_plugin.md)
+  - [extern_plugin](./api/extern_plugin.md)
+  - [contracts_sort](./api/contracts_sort.md)
+  - [derive_user](./api/derive_user.md)
+  - [effects_pure](./api/effects_pure.md)
+  - [async_group](./api/async_group.md)
 
 # Project
 

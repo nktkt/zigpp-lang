@@ -11,23 +11,47 @@ on:
       - "CONTRIBUTING.md"
       - "CHANGELOG.md"
       - "examples/**"
+      - "compiler/**"
+      - "tools/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
   cancel-in-progress: false
 
+env:
+  ZIG_VERSION: "0.15.2"
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install Zig
+        run: |
+          set -euo pipefail
+          ZIG_NAME="zig-x86_64-linux-${ZIG_VERSION}"
+          ZIG_ARCHIVE="${ZIG_NAME}.tar.xz"
+          ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/${ZIG_ARCHIVE}"
+          curl -fsSL "$ZIG_URL" -o "$ZIG_ARCHIVE"
+          tar -xJf "$ZIG_ARCHIVE"
+          echo "$(pwd)/${ZIG_NAME}" >> "$GITHUB_PATH"
+          "${ZIG_NAME}/zig" version
+
+      - name: Build zpp tools
+        run: zig build
+
+      - name: Regenerate API reference from examples
+        run: ./zig-out/bin/zpp-doc examples -o docs/src/api
 
       - name: Install mdBook
         run: |
@@ -54,6 +78,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
