@@ -41,6 +41,7 @@ pub const Code = enum {
     z0011_using_type_lacks_deinit,
     z0020_use_after_move,
     z0030_effect_violation,
+    z0040_impl_missing_method,
     z0100_unexpected_token,
     z0101_expected_identifier,
     z0102_expected_token,
@@ -56,6 +57,7 @@ pub const Code = enum {
             .z0011_using_type_lacks_deinit => "Z0011",
             .z0020_use_after_move => "Z0020",
             .z0030_effect_violation => "Z0030",
+            .z0040_impl_missing_method => "Z0040",
             .z0100_unexpected_token => "Z0100",
             .z0101_expected_identifier => "Z0101",
             .z0102_expected_token => "Z0102",
@@ -77,6 +79,7 @@ pub fn hint(code: Code) ?[]const u8 {
         .z0011_using_type_lacks_deinit => "give the type a `deinit` method, or drop the `using` binding so the compiler does not try to auto-release it.",
         .z0020_use_after_move => "the value was consumed by `move`. Rebind it (`own var x = ...`) or restructure the code to keep a single owner.",
         .z0030_effect_violation => "the function declared an effect it then violated. Remove the `effects(...)` annotation or eliminate the disallowed operation (allocation, IO, etc.).",
+        .z0040_impl_missing_method => "every method declared on the trait must be implemented. Add the listed missing methods, or drop the impl block if you do not intend to satisfy the trait.",
         .z0100_unexpected_token => "remove or replace the highlighted token. The parser was in the middle of a declaration or expression and could not continue.",
         .z0101_expected_identifier => "supply a name here, e.g. `fn name(...)`, `struct Name { ... }`, or `const name = ...`.",
         .z0102_expected_token => "insert the expected token. Most often a missing `;`, `,`, `)`, or `}` in the surrounding scope.",
@@ -179,6 +182,24 @@ pub fn explain(code: Code) []const u8 {
         \\
         \\Fix: drop the `effects(.noalloc)` annotation, or eliminate the
         \\allocation (use a fixed buffer / arena owned by the caller).
+        ,
+        .z0040_impl_missing_method =>
+        \\Z0040: impl is missing trait method(s)
+        \\
+        \\An `impl Trait for Type { ... }` block must implement every method
+        \\declared on `trait Trait { ... }`. Sema cross-checks the two and
+        \\lists any methods that are required by the trait but not present
+        \\in the impl.
+        \\
+        \\Triggers:
+        \\    trait Greeter { fn greet(self) void; fn farewell(self) void; }
+        \\    impl Greeter for Friendly {
+        \\        fn greet(self) void {}
+        \\        // farewell is missing
+        \\    }
+        \\
+        \\Fix: add the missing method(s), or remove the impl block if Type
+        \\does not need to satisfy Greeter.
         ,
         .z0100_unexpected_token =>
         \\Z0100: unexpected token

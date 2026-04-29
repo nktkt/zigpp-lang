@@ -56,3 +56,36 @@ test "Z0030: noalloc effect violated by allocator call" {
     defer result.diags.deinit();
     try std.testing.expect(hasCode(&result.diags, "Z0030"));
 }
+
+test "Z0040: impl missing trait method" {
+    const a = std.testing.allocator;
+    const src =
+        \\trait Greeter {
+        \\    fn greet(self) void;
+        \\    fn farewell(self) void;
+        \\}
+        \\const Friendly = struct { name: []const u8 };
+        \\impl Greeter for Friendly {
+        \\    fn greet(self) void { _ = self; }
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(hasCode(&result.diags, "Z0040"));
+}
+
+test "Z0040: complete impl produces no diagnostic" {
+    const a = std.testing.allocator;
+    const src =
+        \\trait Greeter {
+        \\    fn greet(self) void;
+        \\}
+        \\const Friendly = struct { name: []const u8 };
+        \\impl Greeter for Friendly {
+        \\    fn greet(self) void { _ = self; }
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(!hasCode(&result.diags, "Z0040"));
+}
