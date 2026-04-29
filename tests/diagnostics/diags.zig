@@ -56,3 +56,38 @@ test "Z0030: noalloc effect violated by allocator call" {
     defer result.diags.deinit();
     try std.testing.expect(hasCode(&result.diags, "Z0030"));
 }
+
+fn findDiag(diags: *const compiler.diagnostics.Diagnostics, code_id: []const u8) ?compiler.diagnostics.Diagnostic {
+    for (diags.items.items) |d| {
+        if (std.mem.eql(u8, d.code.id(), code_id)) return d;
+    }
+    return null;
+}
+
+test "Z0040: unknown derive name is rejected with a suggestion" {
+    const a = std.testing.allocator;
+    const src = "struct User { id: u32 } derive(.{ Hashh });";
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    const d = findDiag(&result.diags, "Z0040") orelse return error.MissingDiag;
+    try std.testing.expect(std.mem.indexOf(u8, d.message, "Hashh") != null);
+    try std.testing.expect(std.mem.indexOf(u8, d.message, "Hash") != null);
+}
+
+test "Z0040: known derive names do not trigger the diagnostic" {
+    const a = std.testing.allocator;
+    const src = "struct User { id: u32 } derive(.{ Hash, Iterator, Compare, FromStr, Serialize });";
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(!hasCode(&result.diags, "Z0040"));
+}
+
+test "Z0040: wildly off-base name skips the suggestion" {
+    const a = std.testing.allocator;
+    const src = "struct User { id: u32 } derive(.{ Quokka });";
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    const d = findDiag(&result.diags, "Z0040") orelse return error.MissingDiag;
+    try std.testing.expect(std.mem.indexOf(u8, d.message, "Quokka") != null);
+    try std.testing.expect(std.mem.indexOf(u8, d.message, "did you mean") == null);
+}

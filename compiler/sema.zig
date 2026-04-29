@@ -37,8 +37,49 @@ pub const Sema = struct {
         try self.checkImpls(file, &result);
         try self.checkParams(file, &result);
         try self.checkFunctions(file, &result);
+        try self.checkDerives(file);
 
         return result;
+    }
+
+    /// Names accepted by `derive(.{ ... })`. Must stay in lockstep with
+    /// `lib/derive.zig`'s public namespace and `lower_to_zig.zig`'s
+    /// `lowerDeriveDecls` switch.
+    const known_derives = [_][]const u8{
+        "Hash",     "Eq",        "Ord",     "Default",
+        "Clone",    "Debug",     "Json",    "Iterator",
+        "Serialize", "Compare",  "FromStr",
+    };
+
+    fn checkDerives(self: *Sema, file: *const ast.File) !void {
+        for (file.decls) |d| {
+            const maybe_derive = switch (d) {
+                .struct_decl => |s| s.derive,
+                .owned_struct => |o| o.derive,
+                else => null,
+            };
+            const da = maybe_derive orelse continue;
+            for (da.names) |n| {
+                if (isKnownDerive(n)) continue;
+                if (suggestDerive(n)) |hint_name| {
+                    try self.diags.emit(
+                        .err,
+                        .z0040_unknown_derive,
+                        da.span,
+                        "unknown derive '{s}' (did you mean '{s}'?)",
+                        .{ n, hint_name },
+                    );
+                } else {
+                    try self.diags.emit(
+                        .err,
+                        .z0040_unknown_derive,
+                        da.span,
+                        "unknown derive '{s}'",
+                        .{n},
+                    );
+                }
+            }
+        }
     }
 
     fn collectDecls(self: *Sema, file: *const ast.File, r: *SemaResult) !void {
@@ -376,6 +417,50 @@ fn mentionsIdent(text: []const u8, name: []const u8) bool {
 
 fn isIdent(c: u8) bool {
     return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
+}
+
+fn isKnownDerive(name: []const u8) bool {
+    for (Sema.known_derives) |k| if (std.mem.eql(u8, k, name)) return true;
+    return false;
+}
+
+/// Returns the closest known derive name within a small edit-distance
+/// budget, or null when nothing is close enough. Distance threshold of 2
+/// catches single typos and double-letter mistakes (`Hashh`, `Defualt`)
+/// without surfacing wild guesses for completely off-base names.
+fn suggestDerive(name: []const u8) ?[]const u8 {
+    var best: ?[]const u8 = null;
+    var best_dist: usize = std.math.maxInt(usize);
+    for (Sema.known_derives) |k| {
+        const dist = editDistance(name, k);
+        if (dist < best_dist) {
+            best_dist = dist;
+            best = k;
+        }
+    }
+    return if (best_dist <= 2) best else null;
+}
+
+/// Levenshtein distance, capped at 4 — anything past that is "not close".
+fn editDistance(a: []const u8, b: []const u8) usize {
+    if (a.len == 0) return b.len;
+    if (b.len == 0) return a.len;
+    if (@max(a.len, b.len) > 32) return std.math.maxInt(usize);
+    var prev: [33]usize = undefined;
+    var curr: [33]usize = undefined;
+    var j: usize = 0;
+    while (j <= b.len) : (j += 1) prev[j] = j;
+    var i: usize = 1;
+    while (i <= a.len) : (i += 1) {
+        curr[0] = i;
+        var k: usize = 1;
+        while (k <= b.len) : (k += 1) {
+            const cost: usize = if (a[i - 1] == b[k - 1]) 0 else 1;
+            curr[k] = @min(@min(prev[k] + 1, curr[k - 1] + 1), prev[k - 1] + cost);
+        }
+        @memcpy(prev[0 .. b.len + 1], curr[0 .. b.len + 1]);
+    }
+    return prev[b.len];
 }
 
 /// Try to extract a constructor type name from an init expression like

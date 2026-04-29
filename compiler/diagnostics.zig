@@ -41,6 +41,7 @@ pub const Code = enum {
     z0011_using_type_lacks_deinit,
     z0020_use_after_move,
     z0030_effect_violation,
+    z0040_unknown_derive,
     z0100_unexpected_token,
     z0101_expected_identifier,
     z0102_expected_token,
@@ -56,6 +57,7 @@ pub const Code = enum {
             .z0011_using_type_lacks_deinit => "Z0011",
             .z0020_use_after_move => "Z0020",
             .z0030_effect_violation => "Z0030",
+            .z0040_unknown_derive => "Z0040",
             .z0100_unexpected_token => "Z0100",
             .z0101_expected_identifier => "Z0101",
             .z0102_expected_token => "Z0102",
@@ -77,6 +79,7 @@ pub fn hint(code: Code) ?[]const u8 {
         .z0011_using_type_lacks_deinit => "give the type a `deinit` method, or drop the `using` binding so the compiler does not try to auto-release it.",
         .z0020_use_after_move => "the value was consumed by `move`. Rebind it (`own var x = ...`) or restructure the code to keep a single owner.",
         .z0030_effect_violation => "the function declared an effect it then violated. Remove the `effects(...)` annotation or eliminate the disallowed operation (allocation, IO, etc.).",
+        .z0040_unknown_derive => "the derive name does not match any helper in `zpp.derive`. Known helpers: Hash, Eq, Ord, Default, Clone, Debug, Json, Iterator, Serialize, Compare, FromStr.",
         .z0100_unexpected_token => "remove or replace the highlighted token. The parser was in the middle of a declaration or expression and could not continue.",
         .z0101_expected_identifier => "supply a name here, e.g. `fn name(...)`, `struct Name { ... }`, or `const name = ...`.",
         .z0102_expected_token => "insert the expected token. Most often a missing `;`, `,`, `)`, or `}` in the surrounding scope.",
@@ -252,6 +255,23 @@ pub fn explain(code: Code) []const u8 {
         \\
         \\Fix: add the closing `"`. For multi-line content use the `\\\\` line
         \\prefix form Zig provides.
+        ,
+        .z0040_unknown_derive =>
+        \\Z0040: unknown derive name
+        \\
+        \\`derive(.{ ... })` only accepts the helper names exported from
+        \\`zpp.derive`. Anything else falls through to the lowerer's generic
+        \\fallback and then fails at Zig compile time with a less helpful
+        \\"no member" error. Sema catches it earlier.
+        \\
+        \\Known helpers: Hash, Eq, Ord, Default, Clone, Debug, Json,
+        \\Iterator, Serialize, Compare, FromStr.
+        \\
+        \\Triggers:
+        \\    struct User { id: u32 } derive(.{ Hashh });   // typo
+        \\
+        \\Fix:
+        \\    struct User { id: u32 } derive(.{ Hash });
         ,
         .z0300_lower_internal =>
         \\Z0300: internal lowering error
