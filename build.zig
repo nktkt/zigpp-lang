@@ -16,8 +16,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Library artifact is named distinctly so downstream `dep.artifact("zpp")`
+    // unambiguously refers to the executable below.
     const zpp_lib = b.addLibrary(.{
-        .name = "zpp",
+        .name = "zpp-runtime",
         .linkage = .static,
         .root_module = zpp_module,
     });

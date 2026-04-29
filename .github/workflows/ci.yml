@@ -104,6 +104,27 @@ jobs:
           "$ZPP" check src/main.zpp
           popd >/dev/null
 
+      - name: examples-consumer builds and runs (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd examples-consumer
+          zig build run | tee /tmp/consumer-output.txt
+          grep -q "hello from a downstream Zig++ consumer" /tmp/consumer-output.txt
+          grep -q "event hash = " /tmp/consumer-output.txt
+
+      - name: examples-consumer builds and runs (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Push-Location examples-consumer
+          $out = (zig build run) | Out-String
+          Pop-Location
+          if ($out -notmatch "hello from a downstream Zig\+\+ consumer") { throw "downstream output missing" }
+          if ($out -notmatch "event hash = ") { throw "event hash missing" }
+
       - name: zpp init scaffolds a working project (windows)
         if: runner.os == 'Windows'
         shell: pwsh

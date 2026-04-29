@@ -14,9 +14,21 @@ pub const ServerError = error{
 
 const DocStore = std.StringHashMap([]u8);
 
+/// Cached diagnostic span so hover can resolve `(uri, line, col)` -> code
+/// without re-running parse + sema.
+const HoverDiag = struct {
+    line: usize, // 0-indexed
+    col_start: usize,
+    col_end: usize,
+    code: compiler.diagnostics.Code,
+};
+
+const HoverStore = std.StringHashMap(std.ArrayList(HoverDiag));
+
 const Server = struct {
     allocator: std.mem.Allocator,
     docs: DocStore,
+    diags: HoverStore,
     initialized: bool = false,
     shutdown_requested: bool = false,
 
@@ -24,6 +36,7 @@ const Server = struct {
         return .{
             .allocator = allocator,
             .docs = DocStore.init(allocator),
+            .diags = HoverStore.init(allocator),
         };
     }
 
@@ -34,6 +47,12 @@ const Server = struct {
             self.allocator.free(e.value_ptr.*);
         }
         self.docs.deinit();
+        var dit = self.diags.iterator();
+        while (dit.next()) |e| {
+            self.allocator.free(e.key_ptr.*);
+            e.value_ptr.deinit(self.allocator);
+        }
+        self.diags.deinit();
     }
 };
 
@@ -161,7 +180,7 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
 
     if (std.mem.eql(u8, method, "initialize")) {
         const caps =
-            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false}},"serverInfo":{"name":"zpp-lsp","version":"0.1.0"}}
+            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false}},"serverInfo":{"name":"zpp-lsp","version":"0.1.0"}}
         ;
         try writeResult(server.allocator, id_text, caps);
         return;
@@ -195,9 +214,62 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
         try onFormatting(server, id_text, params);
         return;
     }
+    if (std.mem.eql(u8, method, "textDocument/hover")) {
+        try onHover(server, id_text, params);
+        return;
+    }
     if (obj.get("id") != null) {
         try writeError(server.allocator, id_text, -32601, "method not found");
     }
+}
+
+fn onHover(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    const p = params orelse {
+        try writeResult(server.allocator, id_text, "null");
+        return;
+    };
+    const td = p.object.get("textDocument") orelse {
+        try writeResult(server.allocator, id_text, "null");
+        return;
+    };
+    const uri = td.object.get("uri") orelse {
+        try writeResult(server.allocator, id_text, "null");
+        return;
+    };
+    const pos = p.object.get("position") orelse {
+        try writeResult(server.allocator, id_text, "null");
+        return;
+    };
+    const line: usize = @intCast(pos.object.get("line").?.integer);
+    const character: usize = @intCast(pos.object.get("character").?.integer);
+
+    const list = server.diags.getPtr(uri.string) orelse {
+        try writeResult(server.allocator, id_text, "null");
+        return;
+    };
+    for (list.items) |hd| {
+        if (hd.line != line) continue;
+        if (character < hd.col_start or character > hd.col_end) continue;
+        const explain_text = compiler.diagnostics.explain(hd.code);
+        // Format as a Markdown hover with the code id as the title.
+        const md = try std.fmt.allocPrint(
+            server.allocator,
+            "**{s}**\n\n```text\n{s}\n```",
+            .{ hd.code.id(), explain_text },
+        );
+        defer server.allocator.free(md);
+        const escaped = try jsonStringify(server.allocator, md);
+        defer server.allocator.free(escaped);
+        const result = try std.fmt.allocPrint(
+            server.allocator,
+            "{{\"contents\":{{\"kind\":\"markdown\",\"value\":{s}}}}}",
+            .{escaped},
+        );
+        defer server.allocator.free(result);
+        try writeResult(server.allocator, id_text, result);
+        return;
+    }
+    try writeResult(server.allocator, id_text, "null");
 }
 
 fn extractTextDoc(params: ?std.json.Value) ?struct {
@@ -277,6 +349,15 @@ fn publishDiagnostics(server: *Server, uri: []const u8, text: []const u8) !void 
     defer diags_array.deinit(server.allocator);
     try diags_array.appendSlice(server.allocator, "[");
 
+    // Reset hover cache for this URI.
+    if (server.diags.fetchRemove(uri)) |entry| {
+        server.allocator.free(entry.key);
+        var v = entry.value;
+        v.deinit(server.allocator);
+    }
+    var hover_list: std.ArrayList(HoverDiag) = .{};
+    errdefer hover_list.deinit(server.allocator);
+
     // COMPILER_API: parseAndAnalyze surface; if missing we degrade silently.
     var first = true;
     if (compiler.parseAndAnalyze(server.allocator, text)) |result_const| {
@@ -291,6 +372,16 @@ fn publishDiagnostics(server: *Server, uri: []const u8, text: []const u8) !void 
             };
             if (!first) try diags_array.appendSlice(server.allocator, ",");
             first = false;
+            const lc_end = compiler.locate(text, d.span.end);
+            // Cache line-anchored: hover on any column of the diag's start
+            // line returns the explanation. Wider matches help users who
+            // squint at the underline rather than the exact caret column.
+            try hover_list.append(server.allocator, .{
+                .line = lc.line - 1,
+                .col_start = 0,
+                .col_end = if (lc_end.line == lc.line) lc_end.col else std.math.maxInt(usize),
+                .code = d.code,
+            });
             const entry = try std.fmt.allocPrint(
                 server.allocator,
                 "{{\"range\":{{\"start\":{{\"line\":{d},\"character\":{d}}},\"end\":{{\"line\":{d},\"character\":{d}}}}},\"severity\":{d},\"code\":\"{s}\",\"message\":{s}}}",
@@ -307,6 +398,9 @@ fn publishDiagnostics(server: *Server, uri: []const u8, text: []const u8) !void 
     } else |_| {}
 
     try diags_array.appendSlice(server.allocator, "]");
+
+    const uri_dup = try server.allocator.dupe(u8, uri);
+    try server.diags.put(uri_dup, hover_list);
 
     const params = try std.fmt.allocPrint(
         server.allocator,

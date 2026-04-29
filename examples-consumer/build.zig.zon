@@ -1,0 +1,19 @@
+.{
+    .name = .examples_consumer,
+    .version = "0.1.0",
+    .fingerprint = 0x31f03815591c21ae,
+    .minimum_zig_version = "0.15.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+    },
+    .dependencies = .{
+        // In-tree path dependency so this consumer always tracks main.
+        // External users would replace this with a `git+...` url + hash.
+        .zigpp = .{
+            .path = "..",
+        },
+    },
+}

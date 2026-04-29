@@ -1,0 +1,40 @@
+/// Downstream consumer demo. Pulls Zig++ as a regular Zig package and
+/// exercises the runtime: a derived struct, a trait + dynamic dispatch,
+/// and a using-managed resource.
+///
+/// `zig build run` from examples-consumer/ produces:
+///   hello from a downstream Zig++ consumer
+///   event hash = ...
+///   (consumer demo: package import works end-to-end)
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+const Event = struct {
+    name: []const u8,
+    payload: u32,
+} derive(.{ Hash });
+
+trait Sink {
+    fn write(self, msg: []const u8) void;
+}
+
+const Stdout = struct {
+    label: []const u8,
+};
+
+impl Sink for Stdout {
+    fn write(self, msg: []const u8) void {
+        std.debug.print("[{s}] {s}\n", .{ self.label, msg });
+    }
+}
+
+pub fn main() !void {
+    var sink = Stdout{ .label = "demo" };
+    sink.write("hello from a downstream Zig++ consumer");
+
+    const e = Event{ .name = "click", .payload = 42 };
+    std.debug.print("event hash = {x}\n", .{e.hash()});
+
+    std.debug.print("(consumer demo: package import works end-to-end)\n", .{});
+}
