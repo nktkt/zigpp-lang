@@ -20,6 +20,7 @@ const Subcommand = enum {
     lower,
     fmt,
     check,
+    watch,
     doc,
     migrate,
     lsp,
@@ -35,6 +36,7 @@ const Subcommand = enum {
             .{ "lower", .lower },
             .{ "fmt", .fmt },
             .{ "check", .check },
+            .{ "watch", .watch },
             .{ "doc", .doc },
             .{ "migrate", .migrate },
             .{ "lsp", .lsp },
@@ -118,6 +120,7 @@ pub fn run(allocator: std.mem.Allocator, argv: [][:0]u8) !ExitCode {
         .lower => cmdLower(allocator, rest),
         .fmt => cmdFmt(allocator, rest),
         .check => cmdCheck(allocator, rest),
+        .watch => cmdWatch(allocator, rest),
         .doc => cmdDoc(allocator, rest),
         .migrate => cmdMigrate(allocator, rest),
         .lsp => cmdLsp(allocator, rest),
@@ -141,6 +144,7 @@ fn printUsage() void {
         \\    lower <file.zpp>     print lowered .zig to stdout
         \\    fmt [paths...]       format .zpp files in place
         \\    check [paths...]     parse + sema, no codegen, exit nonzero on diagnostic
+        \\    watch [paths...]     re-run `check` whenever any .zpp under <paths> changes
         \\    doc [paths...]       generate markdown docs from .zpp doc comments
         \\    migrate <file.zig>   suggest .zpp rewrites for a .zig file
         \\    lsp                  start LSP server on stdin/stdout
@@ -173,6 +177,7 @@ fn cmdHelp(args: [][:0]u8) !ExitCode {
         .lower => "zpp lower <file.zpp>\n  Print lowered .zig source for one file to stdout.\n",
         .fmt => "zpp fmt [paths...]\n  Re-emit .zpp files with canonical whitespace; expands directories.\n",
         .check => "zpp check [paths...]\n  Parse and semantically analyse .zpp files; emit diagnostics; exit 1 on error.\n",
+        .watch => "zpp watch [paths...]\n  Snapshot .zpp file mtimes and re-run `zpp check` whenever any of them changes. Polls every ~500ms; Ctrl-C to exit.\n",
         .doc => "zpp doc [paths...]\n  Walk .zpp files and emit Markdown for trait/fn/struct/extern interface decls.\n",
         .migrate => "zpp migrate <file.zig>\n  Diff suggestions to convert defer/init/deinit patterns to Zig++.\n",
         .lsp => "zpp lsp\n  Speak LSP over stdio. Run from your editor; not for human use.\n",
@@ -622,6 +627,144 @@ fn cmdMigrate(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
     return migrate.runMigrate(allocator, args);
 }
 
+fn cmdWatch(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
+    var paths: std.ArrayList([]const u8) = .{};
+    defer paths.deinit(allocator);
+    for (args) |a| try paths.append(allocator, a);
+    if (paths.items.len == 0) try paths.append(allocator, ".");
+
+    var snapshot = std.StringHashMap(i128).init(allocator);
+    defer {
+        var it = snapshot.iterator();
+        while (it.next()) |e| allocator.free(e.key_ptr.*);
+        snapshot.deinit();
+    }
+
+    oPrint("zpp watch: watching {d} path(s) (Ctrl-C to exit)\n", .{paths.items.len});
+
+    // Initial check + snapshot.
+    try refreshSnapshot(allocator, paths.items, &snapshot);
+    var any_error = false;
+    try runCheckOver(allocator, paths.items, &any_error);
+    if (any_error) {
+        oPrint("zpp watch: initial check reported errors\n", .{});
+    } else {
+        oPrint("zpp watch: initial check ok\n", .{});
+    }
+
+    while (true) {
+        std.Thread.sleep(500 * std.time.ns_per_ms);
+        if (try snapshotChanged(allocator, paths.items, &snapshot)) {
+            oPrint("\nzpp watch: change detected — re-running check\n", .{});
+            any_error = false;
+            try runCheckOver(allocator, paths.items, &any_error);
+            if (any_error) {
+                oPrint("zpp watch: errors\n", .{});
+            } else {
+                oPrint("zpp watch: ok\n", .{});
+            }
+        }
+    }
+}
+
+/// Build a fresh map of `.zpp` paths -> mtime (ns) under each root path.
+fn refreshSnapshot(
+    allocator: std.mem.Allocator,
+    roots: []const []const u8,
+    out: *std.StringHashMap(i128),
+) !void {
+    // Drop the previous snapshot.
+    var it = out.iterator();
+    while (it.next()) |e| allocator.free(e.key_ptr.*);
+    out.clearRetainingCapacity();
+
+    for (roots) |root| {
+        try collectMtimes(allocator, root, out);
+    }
+}
+
+fn collectMtimes(
+    allocator: std.mem.Allocator,
+    root: []const u8,
+    out: *std.StringHashMap(i128),
+) !void {
+    if (std.fs.cwd().openDir(root, .{ .iterate = true })) |dir_const| {
+        var dir = dir_const;
+        defer dir.close();
+        var walker = try dir.walk(allocator);
+        defer walker.deinit();
+        while (try walker.next()) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.path, ".zpp")) continue;
+            const full = try std.fs.path.join(allocator, &.{ root, entry.path });
+            const stat = std.fs.cwd().statFile(full) catch {
+                allocator.free(full);
+                continue;
+            };
+            try out.put(full, stat.mtime);
+        }
+        return;
+    } else |_| {}
+    // Treat root as a single file.
+    if (!std.mem.endsWith(u8, root, ".zpp")) return;
+    const stat = std.fs.cwd().statFile(root) catch return;
+    const dup = try allocator.dupe(u8, root);
+    try out.put(dup, stat.mtime);
+}
+
+/// Returns true if any file's mtime differs from `prev` (or files were added /
+/// removed). Updates `prev` to the new state on every call.
+fn snapshotChanged(
+    allocator: std.mem.Allocator,
+    roots: []const []const u8,
+    prev: *std.StringHashMap(i128),
+) !bool {
+    var current = std.StringHashMap(i128).init(allocator);
+    defer {
+        var it = current.iterator();
+        while (it.next()) |e| allocator.free(e.key_ptr.*);
+        current.deinit();
+    }
+    for (roots) |root| try collectMtimes(allocator, root, &current);
+
+    var changed = current.count() != prev.count();
+    if (!changed) {
+        var it = current.iterator();
+        while (it.next()) |e| {
+            const old = prev.get(e.key_ptr.*) orelse {
+                changed = true;
+                break;
+            };
+            if (old != e.value_ptr.*) {
+                changed = true;
+                break;
+            }
+        }
+    }
+    if (changed) {
+        // Replace prev with a deep copy of current.
+        var pit = prev.iterator();
+        while (pit.next()) |e| allocator.free(e.key_ptr.*);
+        prev.clearRetainingCapacity();
+        var cit = current.iterator();
+        while (cit.next()) |e| {
+            const dup = try allocator.dupe(u8, e.key_ptr.*);
+            try prev.put(dup, e.value_ptr.*);
+        }
+    }
+    return changed;
+}
+
+fn runCheckOver(
+    allocator: std.mem.Allocator,
+    roots: []const []const u8,
+    any_error: *bool,
+) !void {
+    for (roots) |root| {
+        try checkPath(allocator, root, any_error);
+    }
+}
+
 fn cmdLsp(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
     _ = args;
     return lsp.runServer(allocator);
@@ -934,4 +1077,42 @@ test "all_codes covers every Code variant exactly once" {
         try std.testing.expect(compiler.diagnostics.summary(c).len > 0);
         try std.testing.expect(!std.mem.startsWith(u8, compiler.diagnostics.summary(c), "Z"));
     }
+}
+
+test "Subcommand.parse covers watch" {
+    try std.testing.expectEqual(Subcommand.watch, Subcommand.parse("watch").?);
+}
+
+test "snapshotChanged detects new file and updates prev" {
+    const a = std.testing.allocator;
+    var snap = std.StringHashMap(i128).init(a);
+    defer {
+        var it = snap.iterator();
+        while (it.next()) |e| a.free(e.key_ptr.*);
+        snap.deinit();
+    }
+
+    // Create a tmp dir with a single .zpp file.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{ .sub_path = "a.zpp", .data = "fn main() void {}" });
+    const root = try tmp.dir.realpathAlloc(a, ".");
+    defer a.free(root);
+
+    const roots = [_][]const u8{root};
+    // First call records baseline; reports changed because count went 0->1.
+    const initial_changed = try snapshotChanged(a, &roots, &snap);
+    try std.testing.expect(initial_changed);
+    try std.testing.expectEqual(@as(usize, 1), snap.count());
+
+    // No-op second call: nothing changed.
+    const second = try snapshotChanged(a, &roots, &snap);
+    try std.testing.expect(!second);
+
+    // Add another file: changed.
+    try tmp.dir.writeFile(.{ .sub_path = "b.zpp", .data = "fn other() void {}" });
+    const after_add = try snapshotChanged(a, &roots, &snap);
+    try std.testing.expect(after_add);
+    try std.testing.expectEqual(@as(usize, 2), snap.count());
 }
