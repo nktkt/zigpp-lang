@@ -4,6 +4,18 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.14](https://github.com/nktkt/zigpp-lang/compare/v0.1.13...v0.1.14) (2026-04-29)
+
+
+### Features
+
+* **vscode:** snippets, hover docs link, explain quick-fix ([#28](https://github.com/nktkt/zigpp-lang/issues/28)) ([e683631](https://github.com/nktkt/zigpp-lang/commit/e6836318919c7a9f77043a1508dd79503f2aadd3))
+
+
+### Documentation
+
+* **contributing:** add multi-tab / multi-worktree workflow section ([e8e59f1](https://github.com/nktkt/zigpp-lang/commit/e8e59f185c01dc010d4a5991099eaa81c45bcbe1))
+
 ## [0.1.13](https://github.com/nktkt/zigpp-lang/compare/v0.1.12...v0.1.13) (2026-04-29)
 
 
