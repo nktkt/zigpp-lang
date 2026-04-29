@@ -122,6 +122,20 @@ test "derive(Compare) emits lt/le/gt/ge methods" {
     try std.testing.expect(std.mem.indexOf(u8, out, "pub fn ge(self: @This(), other: @This()) bool") != null);
 }
 
+test "?dyn Trait param lowers to ?zpp.Dyn(VTable)" {
+    const a = std.testing.allocator;
+    const src =
+        \\trait Greeter {
+        \\    fn greet(self) void;
+        \\}
+        \\fn maybeGreet(who: ?dyn Greeter) void { _ = who; }
+    ;
+    const out = try lower(a, src);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "?zpp.Dyn(Greeter_VTable)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "who: zpp.Dyn") == null);
+}
+
 test "derive(FromStr) emits a fromStr() method" {
     const a = std.testing.allocator;
     const src =

@@ -329,6 +329,21 @@ pub const Parser = struct {
                 .span = .{ .start = start, .end = trait_tok.span.end },
             };
         }
+        // ?dyn Trait — optional fat pointer.
+        if (self.check(.question)) {
+            // Look ahead: ? dyn Ident
+            if (self.peekAt(1).kind == .kw_dyn and self.peekAt(2).kind == .ident) {
+                _ = self.advance(); // ?
+                _ = self.advance(); // dyn
+                const trait_tok = self.advance(); // Ident
+                return .{
+                    .name = name_text,
+                    .type_text = trait_tok.slice(self.source),
+                    .mode = .nullable_dyn_trait,
+                    .span = .{ .start = start, .end = trait_tok.span.end },
+                };
+            }
+        }
         if (self.check(.kw_anytype)) {
             const t = self.advance();
             return .{
