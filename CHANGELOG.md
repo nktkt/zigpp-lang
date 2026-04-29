@@ -4,6 +4,14 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.18](https://github.com/nktkt/zigpp-lang/compare/v0.1.17...v0.1.18) (2026-04-29)
+
+
+### Features
+
+* **examples:** cli/greet — multi-locale greeter ([#44](https://github.com/nktkt/zigpp-lang/issues/44)) ([#45](https://github.com/nktkt/zigpp-lang/issues/45)) ([e573203](https://github.com/nktkt/zigpp-lang/commit/e57320378e483579637849071ec47e2d78a5adf1))
+* **tools:** \`zpp watch\` polls .zpp files and re-runs check on change ([#47](https://github.com/nktkt/zigpp-lang/issues/47)) ([b9e5e8c](https://github.com/nktkt/zigpp-lang/commit/b9e5e8ccf6a9439fac57300b087df5d7176856b6))
+
 ## [0.1.17](https://github.com/nktkt/zigpp-lang/compare/v0.1.16...v0.1.17) (2026-04-29)
 
 
