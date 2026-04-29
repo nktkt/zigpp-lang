@@ -340,6 +340,29 @@ There is no implicit "module graph" — you can mix and match `.zpp`
 and `.zig` files in the same directory and `@import` either
 extension explicitly.
 
+### No `build.zig` needed
+
+`zpp build` works even when your project has no `build.zig`. It
+walks every `.zpp` file under the current directory, lowers each
+into `.zpp-cache/`, and — if no top-level `build.zig` is present —
+writes a minimal `.zpp-cache/build.zig` shim that compiles
+`src/main.zig` (or `main.zig`, whichever exists) as the executable
+with the `zpp` runtime wired in. Then it invokes
+`zig build --build-file .zpp-cache/build.zig`.
+
+```sh
+# In a directory with main.zpp + util.zpp and no build.zig:
+zpp build
+# zpp build: lowered 2 file(s), 0 error(s)
+# (zig build runs against the auto-generated shim)
+./.zpp-cache/zig-out/bin/<dirname>
+```
+
+The shim is regenerated on every run, so editing it by hand is not
+useful — drop a real `build.zig` at the project root if you need to
+customize. `zpp init` scaffolds one (with `build.zig.zon` and the
+`zigpp` dependency declared) for projects you want to publish.
+
 A worked 2-file example lives under `examples/multi_file/` in the
 repo. Run it with:
 

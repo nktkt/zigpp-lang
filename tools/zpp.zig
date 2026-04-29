@@ -264,10 +264,17 @@ fn cmdRun(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
     return termToExit(term);
 }
 
-/// Find `lib/zpp.zig`. First try the project-relative path (works during
-/// development from the repo root), then fall back to a path relative to the
-/// `zpp` executable for installed binaries.
+/// Find `lib/zpp.zig`. Resolution order:
+///   1. `ZPP_LIB` env var (production override)
+///   2. cwd-relative `lib/zpp.zig` / `../lib/zpp.zig`
+///   3. Walk up from cwd until a `lib/zpp.zig` is found (handles invocation
+///      from any subdirectory of the zigpp-lang repo, e.g. examples/multi_file/)
+///   4. Relative to the `zpp` executable's own dir (installed binaries)
 fn locateZppLib(allocator: std.mem.Allocator) ![]const u8 {
+    if (std.process.getEnvVarOwned(allocator, "ZPP_LIB")) |envp| {
+        return envp;
+    } else |_| {}
+
     const candidates = [_][]const u8{
         "lib/zpp.zig",
         "../lib/zpp.zig",
@@ -276,7 +283,9 @@ fn locateZppLib(allocator: std.mem.Allocator) ![]const u8 {
         std.fs.cwd().access(c, .{}) catch continue;
         return try allocator.dupe(u8, c);
     }
-    // Try alongside the executable.
+
+    if (try findZppLibUpward(allocator)) |p| return p;
+
     const self_dir = try std.fs.selfExeDirPathAlloc(allocator);
     defer allocator.free(self_dir);
     const guesses = [_][]const u8{ "../lib/zpp.zig", "lib/zpp.zig" };
@@ -289,6 +298,26 @@ fn locateZppLib(allocator: std.mem.Allocator) ![]const u8 {
         return path;
     }
     return error.FileNotFound;
+}
+
+fn findZppLibUpward(allocator: std.mem.Allocator) !?[]u8 {
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const start = std.fs.cwd().realpath(".", &cwd_buf) catch return null;
+
+    var current_len: usize = start.len;
+    while (current_len > 0) {
+        const dir_slice = cwd_buf[0..current_len];
+        const candidate = try std.fs.path.join(allocator, &.{ dir_slice, "lib", "zpp.zig" });
+        if (std.fs.cwd().access(candidate, .{})) |_| {
+            return candidate;
+        } else |_| {
+            allocator.free(candidate);
+        }
+        const parent = std.fs.path.dirname(dir_slice) orelse return null;
+        if (parent.len == current_len) return null;
+        current_len = parent.len;
+    }
+    return null;
 }
 
 fn cmdBuild(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
@@ -339,7 +368,51 @@ fn cmdBuild(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
     oPrint("zpp build: lowered {d} file(s), {d} error(s)\n", .{ compiled, errors });
     if (errors > 0) return .user_error;
 
-    var child = std.process.Child.init(&.{ "zig", "build" }, allocator);
+    // If the user has no build.zig, emit a minimal one inside .zpp-cache/
+    // so `zig build` has something to drive. The shim points the executable
+    // at the lowered entry and wires the `zpp` runtime as a module.
+    const has_user_build_zig = blk: {
+        src_dir.access("build.zig", .{}) catch break :blk false;
+        break :blk true;
+    };
+
+    var argv_list: std.ArrayList([]const u8) = .{};
+    defer argv_list.deinit(allocator);
+    try argv_list.appendSlice(allocator, &.{ "zig", "build" });
+
+    if (!has_user_build_zig) {
+        const entry_rel = pickEntryRel(allocator, &cache) catch |e| switch (e) {
+            error.FileNotFound => {
+                ePrint("zpp build: no entry point found. Expected .zpp-cache/src/main.zig or .zpp-cache/main.zig (lower a src/main.zpp or main.zpp).\n", .{});
+                return .user_error;
+            },
+            else => return e,
+        };
+        defer allocator.free(entry_rel);
+
+        const zpp_lib = locateZppLib(allocator) catch |e| {
+            ePrint("zpp build: could not locate the zpp runtime (lib/zpp.zig). Set ZPP_LIB or run from inside the zigpp-lang tree. {s}\n", .{@errorName(e)});
+            return .user_error;
+        };
+        defer allocator.free(zpp_lib);
+        const zpp_lib_abs = try absolutize(allocator, zpp_lib);
+        defer allocator.free(zpp_lib_abs);
+
+        const proj_name = try projectNameFromCwd(allocator);
+        defer allocator.free(proj_name);
+
+        const shim = try renderBuildShim(allocator, .{
+            .name = proj_name,
+            .entry_rel = entry_rel,
+            .zpp_lib_abs = zpp_lib_abs,
+        });
+        defer allocator.free(shim);
+        try cache.writeFile(.{ .sub_path = "build.zig", .data = shim });
+
+        try argv_list.appendSlice(allocator, &.{ "--build-file", ".zpp-cache/build.zig" });
+    }
+
+    var child = std.process.Child.init(argv_list.items, allocator);
     child.stdin_behavior = .Inherit;
     child.stdout_behavior = .Inherit;
     child.stderr_behavior = .Inherit;
@@ -348,6 +421,88 @@ fn cmdBuild(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
         return .user_error;
     };
     return termToExit(term);
+}
+
+const ShimContext = struct {
+    name: []const u8,
+    entry_rel: []const u8,
+    zpp_lib_abs: []const u8,
+};
+
+fn renderBuildShim(allocator: std.mem.Allocator, ctx: ShimContext) ![]u8 {
+    return std.fmt.allocPrint(allocator,
+        \\// Auto-generated by `zpp build` because no user build.zig was found.
+        \\// Regenerated on every `zpp build`. Do not edit — write your own
+        \\// build.zig at the project root if you need to customize.
+        \\const std = @import("std");
+        \\
+        \\pub fn build(b: *std.Build) void {{
+        \\    const target = b.standardTargetOptions(.{{}});
+        \\    const optimize = b.standardOptimizeOption(.{{}});
+        \\
+        \\    const zpp_module = b.createModule(.{{
+        \\        .root_source_file = .{{ .cwd_relative = "{s}" }},
+        \\        .target = target,
+        \\        .optimize = optimize,
+        \\    }});
+        \\
+        \\    const exe_mod = b.createModule(.{{
+        \\        .root_source_file = b.path("{s}"),
+        \\        .target = target,
+        \\        .optimize = optimize,
+        \\    }});
+        \\    exe_mod.addImport("zpp", zpp_module);
+        \\
+        \\    const exe = b.addExecutable(.{{
+        \\        .name = "{s}",
+        \\        .root_module = exe_mod,
+        \\    }});
+        \\    b.installArtifact(exe);
+        \\
+        \\    const run_cmd = b.addRunArtifact(exe);
+        \\    run_cmd.step.dependOn(b.getInstallStep());
+        \\    if (b.args) |args| run_cmd.addArgs(args);
+        \\    const run_step = b.step("run", "Run the project");
+        \\    run_step.dependOn(&run_cmd.step);
+        \\}}
+        \\
+    , .{ ctx.zpp_lib_abs, ctx.entry_rel, ctx.name });
+}
+
+fn pickEntryRel(allocator: std.mem.Allocator, cache: *std.fs.Dir) ![]u8 {
+    const candidates = [_][]const u8{ "src/main.zig", "main.zig" };
+    for (candidates) |c| {
+        cache.access(c, .{}) catch continue;
+        return try allocator.dupe(u8, c);
+    }
+    return error.FileNotFound;
+}
+
+fn absolutize(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (std.fs.path.isAbsolute(path)) return try allocator.dupe(u8, path);
+    return try std.fs.cwd().realpathAlloc(allocator, path);
+}
+
+fn projectNameFromCwd(allocator: std.mem.Allocator) ![]u8 {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = std.fs.cwd().realpath(".", &buf) catch {
+        return try allocator.dupe(u8, "app");
+    };
+    return sanitizeProjectName(allocator, std.fs.path.basename(cwd));
+}
+
+fn sanitizeProjectName(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(allocator);
+    if (raw.len == 0 or !std.ascii.isAlphabetic(raw[0])) {
+        try out.append(allocator, 'a');
+    }
+    for (raw) |c| {
+        const ok = std.ascii.isAlphanumeric(c) or c == '_' or c == '-';
+        try out.append(allocator, if (ok) c else '_');
+    }
+    if (out.items.len == 0) try out.appendSlice(allocator, "app");
+    return out.toOwnedSlice(allocator);
 }
 
 fn cmdFmt(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
@@ -644,6 +799,45 @@ test "renderTemplate substitutes both placeholders" {
 test "Subcommand.parse covers init and explain" {
     try std.testing.expectEqual(Subcommand.init, Subcommand.parse("init").?);
     try std.testing.expectEqual(Subcommand.explain, Subcommand.parse("explain").?);
+}
+
+test "sanitizeProjectName handles common basenames" {
+    const a = std.testing.allocator;
+
+    const ok = try sanitizeProjectName(a, "multi_file");
+    defer a.free(ok);
+    try std.testing.expectEqualStrings("multi_file", ok);
+
+    const dashed = try sanitizeProjectName(a, "my-project");
+    defer a.free(dashed);
+    try std.testing.expectEqualStrings("my-project", dashed);
+
+    const num_first = try sanitizeProjectName(a, "9hello");
+    defer a.free(num_first);
+    try std.testing.expectEqualStrings("a9hello", num_first);
+
+    const weird = try sanitizeProjectName(a, "foo bar.baz");
+    defer a.free(weird);
+    try std.testing.expectEqualStrings("foo_bar_baz", weird);
+
+    const empty = try sanitizeProjectName(a, "");
+    defer a.free(empty);
+    try std.testing.expectEqualStrings("a", empty);
+}
+
+test "renderBuildShim substitutes name, entry, and lib path" {
+    const a = std.testing.allocator;
+    const out = try renderBuildShim(a, .{
+        .name = "demo",
+        .entry_rel = "src/main.zig",
+        .zpp_lib_abs = "/abs/path/to/lib/zpp.zig",
+    });
+    defer a.free(out);
+    // Spot-check the three substitutions and the run step wiring.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"/abs/path/to/lib/zpp.zig\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "b.path(\"src/main.zig\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, ".name = \"demo\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "b.step(\"run\"") != null);
 }
 
 test "explain finds every code by id" {
