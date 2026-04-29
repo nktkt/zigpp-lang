@@ -2,6 +2,16 @@ const std = @import("std");
 const ast = @import("ast.zig");
 const diag = @import("diagnostics.zig");
 
+/// Per-fn effect set produced by the inference passes. Each flag is true
+/// iff sema's heuristic concluded the fn (transitively) exhibits that
+/// effect. Used by `@effectsOf(f)` lowering and by the Z0030 violation
+/// emitter.
+pub const InferredEffects = packed struct {
+    alloc: bool = false,
+    io: bool = false,
+    panic: bool = false,
+};
+
 /// Result of semantic analysis. The maps are owned by `deinit`.
 pub const SemaResult = struct {
     allocator: std.mem.Allocator,
@@ -12,11 +22,18 @@ pub const SemaResult = struct {
     trait_methods: std.StringHashMap([]const ast.TraitMethod),
     /// Map of owned-struct names → whether they have a deinit method.
     owned_structs: std.StringHashMap(bool),
+    /// Inferred effect set per same-file fn name. Populated by the three
+    /// `check*EffectInference` passes (each tees its result into this
+    /// table at the end of the fixed-point loop). When two fns share a
+    /// name (e.g. `init` on multiple structs) the first one wins — the
+    /// MVP does not resolve overloads.
+    inferred_effects: std.StringHashMap(InferredEffects),
 
     pub fn deinit(self: *SemaResult) void {
         self.traits.deinit();
         self.trait_methods.deinit();
         self.owned_structs.deinit();
+        self.inferred_effects.deinit();
     }
 };
 
@@ -34,6 +51,7 @@ pub const Sema = struct {
             .traits = std.StringHashMap(void).init(self.allocator),
             .trait_methods = std.StringHashMap([]const ast.TraitMethod).init(self.allocator),
             .owned_structs = std.StringHashMap(bool).init(self.allocator),
+            .inferred_effects = std.StringHashMap(InferredEffects).init(self.allocator),
         };
         errdefer result.deinit();
 
@@ -42,9 +60,9 @@ pub const Sema = struct {
         try self.checkImpls(file, &result);
         try self.checkParams(file, &result);
         try self.checkFunctions(file, &result);
-        try self.checkEffectInference(file);
-        try self.checkIoEffectInference(file);
-        try self.checkPanicEffectInference(file);
+        try self.checkEffectInference(file, &result);
+        try self.checkIoEffectInference(file, &result);
+        try self.checkPanicEffectInference(file, &result);
 
         return result;
     }
@@ -426,7 +444,7 @@ pub const Sema = struct {
     /// Fixed point: iterate until no fn flips from "no .alloc" to ".alloc".
     /// In the worst case this runs N rounds for N fns; in practice it
     /// terminates after one or two passes.
-    fn checkEffectInference(self: *Sema, file: *const ast.File) !void {
+    fn checkEffectInference(self: *Sema, file: *const ast.File, result: *SemaResult) !void {
         // Collect all top-level fns (plain, owned-struct, struct, impl-block
         // members) into a flat list with stable indices.
         var fns: std.ArrayList(*const ast.FnDecl) = .{};
@@ -522,6 +540,17 @@ pub const Sema = struct {
             }
         }
 
+        // Tee the inferred .alloc bit into result.inferred_effects so
+        // callers (notably `@effectsOf(f)` lowering) can query the same
+        // per-fn result the violation pass uses below. We OR into any
+        // existing entry so the IO/panic passes can write the same
+        // record without clobbering each other.
+        for (fns.items, 0..) |fd, i| {
+            const gop = try result.inferred_effects.getOrPut(fd.sig.name);
+            if (!gop.found_existing) gop.value_ptr.* = .{};
+            gop.value_ptr.alloc = gop.value_ptr.alloc or inferred[i];
+        }
+
         // Emit Z0030 for any fn that declares `.noalloc` and has inferred
         // `.alloc`. We prefer the direct-allocation span when available (the
         // local body itself allocates) and otherwise fall back to the fn's
@@ -568,7 +597,7 @@ pub const Sema = struct {
     ///   `.writeLine(`, `.print(`, `.read(`, `.openFile(`, `.createFile(`.
     /// The set is intentionally narrow — broaden in a follow-up PR, not
     /// here.
-    fn checkIoEffectInference(self: *Sema, file: *const ast.File) !void {
+    fn checkIoEffectInference(self: *Sema, file: *const ast.File, result: *SemaResult) !void {
         var fns: std.ArrayList(*const ast.FnDecl) = .{};
         defer fns.deinit(self.allocator);
         for (file.decls) |*d| {
@@ -646,6 +675,15 @@ pub const Sema = struct {
             }
         }
 
+        // Tee the inferred .io bit into result.inferred_effects (see
+        // `checkEffectInference` for the rationale). Other passes
+        // populate other fields, so we OR into the existing record.
+        for (fns.items, 0..) |fd, i| {
+            const gop = try result.inferred_effects.getOrPut(fd.sig.name);
+            if (!gop.found_existing) gop.value_ptr.* = .{};
+            gop.value_ptr.io = gop.value_ptr.io or inferred[i];
+        }
+
         for (fns.items, 0..) |fd, i| {
             const ef = fd.sig.effects orelse continue;
             var declared_noio = false;
@@ -691,7 +729,7 @@ pub const Sema = struct {
     ///   examples that mention `unreachable` only inside doc comments or
     ///   quoted strings safe; the harness already strips strings so the
     ///   primary risk was idiomatic boolean chains.
-    fn checkPanicEffectInference(self: *Sema, file: *const ast.File) !void {
+    fn checkPanicEffectInference(self: *Sema, file: *const ast.File, result: *SemaResult) !void {
         var fns: std.ArrayList(*const ast.FnDecl) = .{};
         defer fns.deinit(self.allocator);
         for (file.decls) |*d| {
@@ -767,6 +805,14 @@ pub const Sema = struct {
                     }
                 }
             }
+        }
+
+        // Tee the inferred .panic bit into result.inferred_effects (see
+        // `checkEffectInference` for the rationale).
+        for (fns.items, 0..) |fd, i| {
+            const gop = try result.inferred_effects.getOrPut(fd.sig.name);
+            if (!gop.found_existing) gop.value_ptr.* = .{};
+            gop.value_ptr.panic = gop.value_ptr.panic or inferred[i];
         }
 
         for (fns.items, 0..) |fd, i| {

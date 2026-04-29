@@ -32,6 +32,14 @@ pub const Span = struct {
 
 /// Diagnostic codes. The numeric ranges map to phase:
 ///   Z00xx — sema (trait/owned/move/effect)
+///     Z0001 unknown trait
+///     Z0010 owned struct missing deinit
+///     Z0011 `using` target lacks deinit
+///     Z0020 use after move
+///     Z0021 borrow invalidated by move
+///     Z0030 effect annotation violated by inference
+///     Z0040 impl missing trait method(s)
+///     Z0050 @effectsOf(f) — fn name not declared in this file
 ///   Z01xx — parser
 ///   Z02xx — lexer
 ///   Z03xx — lower
@@ -43,6 +51,7 @@ pub const Code = enum {
     z0021_borrow_invalidated_by_move,
     z0030_effect_violation,
     z0040_impl_missing_method,
+    z0050_unknown_fn_in_effects_of,
     z0100_unexpected_token,
     z0101_expected_identifier,
     z0102_expected_token,
@@ -60,6 +69,7 @@ pub const Code = enum {
             .z0021_borrow_invalidated_by_move => "Z0021",
             .z0030_effect_violation => "Z0030",
             .z0040_impl_missing_method => "Z0040",
+            .z0050_unknown_fn_in_effects_of => "Z0050",
             .z0100_unexpected_token => "Z0100",
             .z0101_expected_identifier => "Z0101",
             .z0102_expected_token => "Z0102",
@@ -83,6 +93,7 @@ pub fn hint(code: Code) ?[]const u8 {
         .z0021_borrow_invalidated_by_move => "the value still has an outstanding borrow (from `&x` or `&x.field`). End the borrow's scope before moving, or restructure to avoid the conflict.",
         .z0030_effect_violation => "the function declared an effect it then violated. Remove the `effects(...)` annotation or eliminate the disallowed operation (allocation, IO, etc.).",
         .z0040_impl_missing_method => "every method declared on the trait must be implemented. Add the listed missing methods, or drop the impl block if you do not intend to satisfy the trait.",
+        .z0050_unknown_fn_in_effects_of => "@effectsOf(f) only resolves names of functions declared in the same .zpp file. Spell-check the name, declare the fn locally, or wait for cross-file inference (separate proposal).",
         .z0100_unexpected_token => "remove or replace the highlighted token. The parser was in the middle of a declaration or expression and could not continue.",
         .z0101_expected_identifier => "supply a name here, e.g. `fn name(...)`, `struct Name { ... }`, or `const name = ...`.",
         .z0102_expected_token => "insert the expected token. Most often a missing `;`, `,`, `)`, or `}` in the surrounding scope.",
@@ -249,6 +260,29 @@ pub fn explain(code: Code) []const u8 {
         \\
         \\Fix: add the missing method(s), or remove the impl block if Type
         \\does not need to satisfy Greeter.
+        ,
+        .z0050_unknown_fn_in_effects_of =>
+        \\Z0050: @effectsOf(f) — fn name not declared in this file
+        \\
+        \\`@effectsOf(<ident>)` lowers to a comptime `[]const u8` listing the
+        \\effects sema inferred for the function `<ident>` (e.g. `"alloc,io"`
+        \\or `""` for pure). The lookup is restricted to functions declared in
+        \\the same `.zpp` file: top-level fns, `owned struct` / `struct`
+        \\methods, and `impl Trait for T` methods. Cross-file lookup, methods
+        \\addressed via `Type.method`, and indirect calls are out of scope for
+        \\the MVP.
+        \\
+        \\When the name doesn't match any local fn, the lowering still emits
+        \\an empty string `""` so the surrounding code keeps compiling, but
+        \\sema reports Z0050 so you know the queryable result is meaningless.
+        \\
+        \\Triggers:
+        \\    fn local() void {}
+        \\    const set = @effectsOf(loccal);   // typo — Z0050
+        \\    const ext = @effectsOf(std.fs.cwd);  // not a same-file fn — Z0050
+        \\
+        \\Fix: spell the name correctly, declare the fn in this file, or
+        \\drop the `@effectsOf` query until cross-file inference lands.
         ,
         .z0100_unexpected_token =>
         \\Z0100: unexpected token
