@@ -299,6 +299,58 @@ visible `g.vtable.greet` field. Notice that the `dyn` type
 appears in the slice literal (`[_]dyn Greeter{ ... }`) — there's
 no implicit virtual dispatch happening anywhere.
 
+## Step 8 — split your program across multiple files
+
+So far the project has been a single `src/main.zpp`. Real programs
+have more than one file. Add a sibling module:
+
+```sh
+cat > src/util.zpp <<'ZPP'
+const std = @import("std");
+
+pub fn shout(msg: []const u8) void {
+    std.debug.print("UTIL: {s}\n", .{msg});
+}
+ZPP
+```
+
+In `src/main.zpp`, import it by file name:
+
+```zig
+const std = @import("std");
+const util = @import("util.zpp");
+
+pub fn main() !void {
+    util.shout("hello from main");
+}
+```
+
+The Zig++ compiler rewrites `@import("util.zpp")` to
+`@import("util.zig")` during lowering, so the standard Zig import
+resolver finds the lowered sibling at compile time.
+
+```sh
+zig build run
+# UTIL: hello from main
+```
+
+The two files are lowered independently and end up next to each
+other in `.zpp-cache/` (or wherever your `build.zig` puts them).
+There is no implicit "module graph" — you can mix and match `.zpp`
+and `.zig` files in the same directory and `@import` either
+extension explicitly.
+
+A worked 2-file example lives under `examples/multi_file/` in the
+repo. Run it with:
+
+```sh
+zig build multi-e2e
+# main: hello from util.zpp
+# main: this main.zpp ...
+# main: imports util.zpp ...
+# main: via @import("util.zpp")
+```
+
 ## Bonus — explaining a diagnostic code
 
 When the compiler prints a code like `Z0020`, you can ask the CLI for

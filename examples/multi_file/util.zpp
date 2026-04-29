@@ -1,0 +1,30 @@
+/// util.zpp — a small library module imported by main.zpp.
+///
+/// Demonstrates that `pub` decls in one .zpp file are visible to
+/// another via `@import("util.zpp")`. The Zig++ compiler rewrites
+/// the `.zpp` extension to `.zig` so the standard Zig import resolver
+/// finds the lowered sibling at compile time.
+
+const std = @import("std");
+
+trait Printer {
+    fn line(self, msg: []const u8) void;
+}
+
+pub const StdoutPrinter = struct {
+    prefix: []const u8,
+};
+
+impl Printer for StdoutPrinter {
+    fn line(self, msg: []const u8) void {
+        std.debug.print("{s}: {s}\n", .{ self.prefix, msg });
+    }
+}
+
+pub fn shoutAll(p: impl Printer, lines: []const []const u8) void {
+    for (lines) |line| {
+        p.line(line);
+    }
+}
+
+pub const greeting = "hello from util.zpp";

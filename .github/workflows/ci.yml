@@ -81,6 +81,9 @@ jobs:
       - name: zig build e2e
         run: zig build e2e --summary all
 
+      - name: zig build multi-e2e (multi-file imports)
+        run: zig build multi-e2e --summary all
+
       - name: zpp init scaffolds a working project (unix)
         if: runner.os != 'Windows'
         shell: bash

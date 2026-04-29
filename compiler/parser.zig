@@ -178,6 +178,7 @@ pub const Parser = struct {
         var depth: i32 = 0;
         var saw_brace = false;
         var end: u32 = start;
+        var consumed_any = false;
         while (!self.isAtEnd()) {
             const t = self.peek();
             const k = t.kind;
@@ -186,12 +187,14 @@ pub const Parser = struct {
                 saw_brace = true;
                 end = t.span.end;
                 _ = self.advance();
+                consumed_any = true;
                 continue;
             }
             if (k == .r_brace) {
                 depth -= 1;
                 end = t.span.end;
                 _ = self.advance();
+                consumed_any = true;
                 if (depth <= 0 and saw_brace) break;
                 continue;
             }
@@ -200,9 +203,16 @@ pub const Parser = struct {
                 _ = self.advance();
                 break;
             }
-            if (depth == 0 and isTopDeclStart(k) and t.span.start != start) break;
+            // Only break on a sibling top-decl start if we've already
+            // consumed something for the current decl. Otherwise the dispatch
+            // in `parseTopDecl` would have consumed `pub` (or similar) and
+            // left us looking AT the next decl-start keyword (`const`, `fn`,
+            // etc.) — that keyword belongs to the *current* decl we are
+            // about to capture, not to a sibling.
+            if (consumed_any and depth == 0 and isTopDeclStart(k)) break;
             end = t.span.end;
             _ = self.advance();
+            consumed_any = true;
         }
         return .{ .raw = .{
             .text = self.source[start..end],

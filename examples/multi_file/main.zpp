@@ -1,0 +1,23 @@
+/// main.zpp — entry point that imports a sibling .zpp module.
+///
+/// Build with:
+///     zpp lower examples/multi_file/util.zpp > util.zig
+///     zpp lower examples/multi_file/main.zpp > main.zig
+///     zig run main.zig --dep zpp -Mzpp=lib/zpp.zig
+/// Or via `zig build multi-e2e` from the repo root.
+
+const std = @import("std");
+const zpp = @import("zpp");
+const util = @import("util.zpp");
+
+pub fn main() !void {
+    var p = util.StdoutPrinter{ .prefix = "main" };
+    p.line(util.greeting);
+
+    const messages = [_][]const u8{
+        "this main.zpp ...",
+        "imports util.zpp ...",
+        "via @import(\"util.zpp\")",
+    };
+    util.shoutAll(&p, &messages);
+}
