@@ -4,6 +4,13 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.10](https://github.com/nktkt/zigpp-lang/compare/v0.1.9...v0.1.10) (2026-04-29)
+
+
+### Features
+
+* multi-file imports + zpp explain command ([46c2aee](https://github.com/nktkt/zigpp-lang/commit/46c2aee5746ebf396ca1f019a3dfb420189f991a))
+
 ## [0.1.9](https://github.com/nktkt/zigpp-lang/compare/v0.1.8...v0.1.9) (2026-04-28)
 
 
