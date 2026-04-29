@@ -281,6 +281,24 @@ pub const Lowerer = struct {
             } else if (std.mem.eql(u8, n, "Json")) {
                 try self.writeIndent(4);
                 try self.write("pub const json = zpp.derive.Json(@This());\n");
+            } else if (std.mem.eql(u8, n, "Iterator")) {
+                try self.writeIndent(4);
+                try self.write("pub fn iter(self: @This()) zpp.derive.Iterator(@This()).FieldIter { return zpp.derive.Iterator(@This()).iter(self); }\n");
+            } else if (std.mem.eql(u8, n, "Serialize")) {
+                try self.writeIndent(4);
+                try self.write("pub fn serialize(self: @This(), allocator: std.mem.Allocator) ![]u8 { return zpp.derive.Serialize(@This()).serialize(self, allocator); }\n");
+            } else if (std.mem.eql(u8, n, "Compare")) {
+                try self.writeIndent(4);
+                try self.write("pub fn lt(self: @This(), other: @This()) bool { return zpp.derive.Compare(@This()).lt(self, other); }\n");
+                try self.writeIndent(4);
+                try self.write("pub fn le(self: @This(), other: @This()) bool { return zpp.derive.Compare(@This()).le(self, other); }\n");
+                try self.writeIndent(4);
+                try self.write("pub fn gt(self: @This(), other: @This()) bool { return zpp.derive.Compare(@This()).gt(self, other); }\n");
+                try self.writeIndent(4);
+                try self.write("pub fn ge(self: @This(), other: @This()) bool { return zpp.derive.Compare(@This()).ge(self, other); }\n");
+            } else if (std.mem.eql(u8, n, "FromStr")) {
+                try self.writeIndent(4);
+                try self.write("pub fn fromStr(s: []const u8, allocator: std.mem.Allocator) !@This() { return zpp.derive.FromStr(@This()).parse(s, allocator); }\n");
             } else {
                 try self.writeIndent(4);
                 try self.writeFmt("pub const {s} = zpp.derive.{s}(@This());\n", .{ deriveFieldName(n), n });
@@ -608,6 +626,10 @@ fn deriveFieldName(name: []const u8) []const u8 {
     if (std.mem.eql(u8, name, "Eq")) return "eq";
     if (std.mem.eql(u8, name, "Debug")) return "debug";
     if (std.mem.eql(u8, name, "Json")) return "json";
+    if (std.mem.eql(u8, name, "Iterator")) return "iterator";
+    if (std.mem.eql(u8, name, "Serialize")) return "serialize_ns";
+    if (std.mem.eql(u8, name, "Compare")) return "compare";
+    if (std.mem.eql(u8, name, "FromStr")) return "from_str";
     return name;
 }
 

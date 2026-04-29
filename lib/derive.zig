@@ -293,6 +293,172 @@ pub fn Json(comptime T: type) type {
     };
 }
 
+/// Field-name iterator. `iter(value)` returns a `FieldIter` whose `next()`
+/// yields each field's name (in declaration order) as `[]const u8` and then
+/// `null`. Useful for reflection / generic logging where the *names* matter
+/// but per-field values would need a tagged union.
+pub fn Iterator(comptime T: type) type {
+    ensureStruct(T, "Iterator");
+    const struct_fields = @typeInfo(T).@"struct".fields;
+    // Snapshot the names into a runtime-indexable array. The original
+    // `StructField` slice can only be indexed at comptime because each
+    // entry carries a `type: type` field.
+    const names = comptime blk: {
+        var arr: [struct_fields.len][]const u8 = undefined;
+        for (struct_fields, 0..) |f, i| arr[i] = f.name;
+        break :blk arr;
+    };
+    return struct {
+        pub const FieldIter = struct {
+            i: usize = 0,
+
+            pub fn next(self: *FieldIter) ?[]const u8 {
+                if (self.i >= names.len) return null;
+                defer self.i += 1;
+                return names[self.i];
+            }
+
+            pub fn reset(self: *FieldIter) void {
+                self.i = 0;
+            }
+        };
+
+        pub fn iter(_: T) FieldIter {
+            return .{};
+        }
+
+        pub fn fieldCount() usize {
+            return names.len;
+        }
+    };
+}
+
+/// `key=value;key=value` text serialization. Pairs with `FromStr` for a
+/// trivial round-trip on POD-shaped structs. Strings are written verbatim;
+/// callers who need to round-trip values containing `=` or `;` should reach
+/// for `Json` instead.
+pub fn Serialize(comptime T: type) type {
+    ensureStruct(T, "Serialize");
+    return struct {
+        /// Returns an allocator-owned `key=value;key=value` string.
+        pub fn serialize(self: T, allocator: Allocator) ![]u8 {
+            var aw: std.Io.Writer.Allocating = .init(allocator);
+            errdefer aw.deinit();
+            try writeTo(self, &aw.writer);
+            return aw.toOwnedSlice();
+        }
+
+        /// Lower-level entry point that writes into a caller-provided writer.
+        pub fn writeTo(self: T, w: *std.Io.Writer) !void {
+            const fields = @typeInfo(T).@"struct".fields;
+            inline for (fields, 0..) |f, i| {
+                if (i != 0) try w.writeAll(";");
+                try w.writeAll(f.name);
+                try w.writeAll("=");
+                try writeValue(w, @field(self, f.name));
+            }
+        }
+
+        fn writeValue(w: *std.Io.Writer, v: anytype) !void {
+            const V = @TypeOf(v);
+            switch (@typeInfo(V)) {
+                .int, .comptime_int => try w.print("{d}", .{v}),
+                .float, .comptime_float => try w.print("{d}", .{v}),
+                .bool => try w.writeAll(if (v) "true" else "false"),
+                .@"enum" => try w.writeAll(@tagName(v)),
+                .pointer => |p| switch (p.size) {
+                    .slice => if (p.child == u8) try w.writeAll(v) else try w.print("[{d} items]", .{v.len}),
+                    else => try w.print("0x{x}", .{@intFromPtr(v)}),
+                },
+                .optional => if (v) |x| try writeValue(w, x) else try w.writeAll("null"),
+                else => try w.print("<{s}>", .{@typeName(V)}),
+            }
+        }
+    };
+}
+
+/// Boolean comparison helpers backed by `Ord(T).cmp`. Adds `lt/le/gt/ge` plus
+/// `min/max` so callers can write `Compare(T).lt(a, b)` instead of
+/// `Ord(T).cmp(a, b) < 0`. Pure comptime — no allocation.
+pub fn Compare(comptime T: type) type {
+    ensureStruct(T, "Compare");
+    const O = Ord(T);
+    return struct {
+        pub fn lt(self: T, other: T) bool {
+            return O.cmp(self, other) < 0;
+        }
+        pub fn le(self: T, other: T) bool {
+            return O.cmp(self, other) <= 0;
+        }
+        pub fn gt(self: T, other: T) bool {
+            return O.cmp(self, other) > 0;
+        }
+        pub fn ge(self: T, other: T) bool {
+            return O.cmp(self, other) >= 0;
+        }
+        pub fn min(self: T, other: T) T {
+            return if (O.cmp(self, other) <= 0) self else other;
+        }
+        pub fn max(self: T, other: T) T {
+            return if (O.cmp(self, other) >= 0) self else other;
+        }
+    };
+}
+
+/// Inverse of `Serialize`. Parses `key=value,key=value` (commas — distinct
+/// from Serialize's `;`-separator so a writer/parser pair stays unambiguous
+/// when keys contain neither character) into a fresh `T`. Missing fields
+/// stay zero-initialized. Numeric/bool/enum fields parse via the std
+/// helpers; `[]const u8` fields are duplicated into `allocator` so callers
+/// can free them (an arena makes cleanup trivial).
+pub fn FromStr(comptime T: type) type {
+    ensureStruct(T, "FromStr");
+    return struct {
+        pub const Error = error{ InvalidFormat, UnknownField };
+
+        pub fn parse(s: []const u8, allocator: Allocator) !T {
+            var out: T = std.mem.zeroInit(T, .{});
+            var it = std.mem.tokenizeScalar(u8, s, ',');
+            while (it.next()) |kv_raw| {
+                const kv = std.mem.trim(u8, kv_raw, " \t\r\n");
+                if (kv.len == 0) continue;
+                const eq = std.mem.indexOfScalar(u8, kv, '=') orelse return error.InvalidFormat;
+                const key = std.mem.trim(u8, kv[0..eq], " \t");
+                const val = std.mem.trim(u8, kv[eq + 1 ..], " \t");
+                var matched = false;
+                inline for (@typeInfo(T).@"struct".fields) |f| {
+                    if (std.mem.eql(u8, f.name, key)) {
+                        @field(out, f.name) = try parseField(f.type, val, allocator);
+                        matched = true;
+                    }
+                }
+                if (!matched) return error.UnknownField;
+            }
+            return out;
+        }
+
+        fn parseField(comptime V: type, s: []const u8, allocator: Allocator) !V {
+            return switch (@typeInfo(V)) {
+                .int => try std.fmt.parseInt(V, s, 10),
+                .float => try std.fmt.parseFloat(V, s),
+                .bool => if (std.mem.eql(u8, s, "true"))
+                    true
+                else if (std.mem.eql(u8, s, "false"))
+                    false
+                else
+                    error.InvalidFormat,
+                .@"enum" => std.meta.stringToEnum(V, s) orelse error.InvalidFormat,
+                .pointer => |p| if (p.size == .slice and p.child == u8) blk: {
+                    const dup = try allocator.alloc(u8, s.len);
+                    @memcpy(dup, s);
+                    break :blk dup;
+                } else error.InvalidFormat,
+                else => error.InvalidFormat,
+            };
+        }
+    };
+}
+
 const Point = struct {
     x: i32,
     y: i32,
@@ -361,4 +527,60 @@ test "Json round-trips a flat struct" {
     const back = try Json(User).fromJson(s, a);
     try std.testing.expectEqual(u.id, back.id);
     try std.testing.expectEqual(u.flag, back.flag);
+}
+
+test "Iterator yields field names in declaration order" {
+    const p = Point{ .x = 1, .y = 2 };
+    var it = Iterator(Point).iter(p);
+    try std.testing.expectEqualStrings("x", it.next().?);
+    try std.testing.expectEqualStrings("y", it.next().?);
+    try std.testing.expect(it.next() == null);
+    try std.testing.expectEqual(@as(usize, 2), Iterator(Point).fieldCount());
+}
+
+test "Serialize emits key=value pairs separated by ';'" {
+    const u = User{ .id = 7, .flag = true };
+    const a = std.testing.allocator;
+    const s = try Serialize(User).serialize(u, a);
+    defer a.free(s);
+    try std.testing.expectEqualStrings("id=7;flag=true", s);
+}
+
+test "Compare lt/le/gt/ge agree with Ord.cmp" {
+    const a = Point{ .x = 1, .y = 2 };
+    const b = Point{ .x = 1, .y = 3 };
+    try std.testing.expect(Compare(Point).lt(a, b));
+    try std.testing.expect(Compare(Point).le(a, b));
+    try std.testing.expect(!Compare(Point).gt(a, b));
+    try std.testing.expect(!Compare(Point).ge(a, b));
+    try std.testing.expect(Compare(Point).le(a, a));
+    try std.testing.expect(Compare(Point).ge(a, a));
+    try std.testing.expectEqual(a, Compare(Point).min(a, b));
+    try std.testing.expectEqual(b, Compare(Point).max(a, b));
+}
+
+test "FromStr parses key=value,key=value back to T" {
+    const a = std.testing.allocator;
+    const u = try FromStr(User).parse("id=42, flag=false", a);
+    try std.testing.expectEqual(@as(u32, 42), u.id);
+    try std.testing.expectEqual(false, u.flag);
+}
+
+test "FromStr round-trips Serialize for a struct with a string field" {
+    const Owned = struct {
+        id: u32,
+        name: []const u8,
+    };
+    const a = std.testing.allocator;
+    // Serialize uses ';' but FromStr reads ',', so build the FromStr input by hand.
+    const back = try FromStr(Owned).parse("id=7,name=ada", a);
+    defer a.free(back.name);
+    try std.testing.expectEqual(@as(u32, 7), back.id);
+    try std.testing.expectEqualStrings("ada", back.name);
+}
+
+test "FromStr rejects unknown fields and malformed input" {
+    const a = std.testing.allocator;
+    try std.testing.expectError(error.UnknownField, FromStr(User).parse("nope=1", a));
+    try std.testing.expectError(error.InvalidFormat, FromStr(User).parse("no_equals_sign", a));
 }

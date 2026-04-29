@@ -77,3 +77,61 @@ test "multiple using bindings each get their own defer" {
     try std.testing.expect(std.mem.indexOf(u8, out, "defer a.deinit();") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "defer b.deinit();") != null);
 }
+
+test "derive(Iterator) emits an iter() method backed by Iterator(@This())" {
+    const a = std.testing.allocator;
+    const src =
+        \\struct Point {
+        \\    x: i32,
+        \\    y: i32,
+        \\} derive(.{ Iterator });
+    ;
+    const out = try lower(a, src);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn iter(self: @This())") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "zpp.derive.Iterator(@This())") != null);
+}
+
+test "derive(Serialize) emits a serialize() method" {
+    const a = std.testing.allocator;
+    const src =
+        \\struct Point {
+        \\    x: i32,
+        \\    y: i32,
+        \\} derive(.{ Serialize });
+    ;
+    const out = try lower(a, src);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn serialize(self: @This(), allocator: std.mem.Allocator) ![]u8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "zpp.derive.Serialize(@This())") != null);
+}
+
+test "derive(Compare) emits lt/le/gt/ge methods" {
+    const a = std.testing.allocator;
+    const src =
+        \\struct Point {
+        \\    x: i32,
+        \\    y: i32,
+        \\} derive(.{ Compare });
+    ;
+    const out = try lower(a, src);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn lt(self: @This(), other: @This()) bool") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn le(self: @This(), other: @This()) bool") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn gt(self: @This(), other: @This()) bool") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn ge(self: @This(), other: @This()) bool") != null);
+}
+
+test "derive(FromStr) emits a fromStr() method" {
+    const a = std.testing.allocator;
+    const src =
+        \\struct Point {
+        \\    x: i32,
+        \\    y: i32,
+        \\} derive(.{ FromStr });
+    ;
+    const out = try lower(a, src);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn fromStr(s: []const u8, allocator: std.mem.Allocator) !@This()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "zpp.derive.FromStr(@This()).parse") != null);
+}
