@@ -40,6 +40,12 @@ official Zig extension.
   structs, extern interfaces, impl blocks) across every currently-open
   document. Use VS Code's "Go to Symbol in Workspace" (`Ctrl+T` /
   `Cmd+T`) to invoke it.
+- **Rename** (`textDocument/prepareRename` + `textDocument/rename`):
+  press `F2` on a top-level decl name (function, trait, struct, owned
+  struct, extern interface) to rename every same-file occurrence in one
+  edit. Strings, char literals, and `//` comments are skipped. Renaming
+  parameters, locals, method names, and cross-file rename are not yet
+  supported.
 - "Run current file" command that shells out to `zpp run` and streams output
   to the Zig++ output channel.
 - "Show lowered Zig" command that opens the result of `zpp lower` in a new
@@ -119,9 +125,11 @@ code --install-extension zigpp-0.1.0.vsix
   `textDocument/hover`, `textDocument/documentSymbol` (Outline view), a
   context-free `textDocument/completion` (keywords + top-level decl names),
   same-file `textDocument/definition`, same-file `textDocument/references`,
-  and `workspace/symbol` over open documents. Cross-file go-to-definition,
-  cross-file references, workspace search across un-opened files,
-  context-aware completion, method-on-receiver navigation, and rename are
+  `workspace/symbol` over open documents, and same-file
+  `textDocument/rename` (top-level decl names only). Cross-file
+  go-to-definition, cross-file references, cross-file rename, rename of
+  parameters / locals / method names, workspace search across un-opened
+  files, context-aware completion, and method-on-receiver navigation are
   not implemented yet.
 - Semantic highlighting falls back to the TextMate grammar — there's no
   semantic-tokens server response yet.
