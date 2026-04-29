@@ -1,6 +1,11 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const diag = @import("diagnostics.zig");
+const sema = @import("sema.zig");
+
+/// Convenience alias so signatures don't have to spell out the long
+/// generic type. Owned by the caller (typically a `SemaResult`).
+pub const InferredEffectsMap = std.StringHashMap(sema.InferredEffects);
 
 /// Lowering pass: walks an `ast.File` and produces a Zig source string.
 ///
@@ -18,6 +23,11 @@ pub const Lowerer = struct {
     /// method bodies into parsed `const X = struct {...}` decls so that static
     /// dispatch (`who.greet()`) resolves through normal Zig method lookup.
     impls_by_target: std.StringHashMap(std.ArrayList(*const ast.ImplBlock)),
+    /// Per-fn inferred effect set, supplied by sema. Optional because
+    /// some lowering callers (snapshot tests, raw smoke tests) skip
+    /// sema entirely. When null, `@effectsOf(<ident>)` lowers to `""`
+    /// and Z0050 is suppressed (we have no table to check against).
+    inferred_effects: ?*const InferredEffectsMap = null,
 
     pub fn init(allocator: std.mem.Allocator, diags: *diag.Diagnostics) Lowerer {
         return .{
@@ -27,7 +37,21 @@ pub const Lowerer = struct {
             .trait_set = std.StringHashMap(void).init(allocator),
             .extern_traits = std.StringHashMap(void).init(allocator),
             .impls_by_target = std.StringHashMap(std.ArrayList(*const ast.ImplBlock)).init(allocator),
+            .inferred_effects = null,
         };
+    }
+
+    /// Same as `init` but also wires the per-fn inferred-effect table so
+    /// `@effectsOf(<ident>)` substitutions resolve. Pass the map straight
+    /// from `sema.SemaResult.inferred_effects`.
+    pub fn initWithEffects(
+        allocator: std.mem.Allocator,
+        diags: *diag.Diagnostics,
+        effects: *const InferredEffectsMap,
+    ) Lowerer {
+        var lw = init(allocator, diags);
+        lw.inferred_effects = effects;
+        return lw;
     }
 
     pub fn deinit(self: *Lowerer) void {
@@ -387,6 +411,47 @@ pub const Lowerer = struct {
         }
     }
 
+    /// Look up `ident` in the per-fn inferred-effect table and write a
+    /// double-quoted comma-separated literal (e.g. `"alloc,io"`, `""` for
+    /// pure). Order is fixed (alloc, io, panic) so the produced string is
+    /// stable and trivially comparable in user comptime. Unknown idents
+    /// emit `""` and a Z0050 diagnostic; a missing table (e.g. snapshot
+    /// tests that bypass sema) silently emits `""`.
+    fn writeEffectsOfFor(self: *Lowerer, ident: []const u8) !void {
+        const map = self.inferred_effects orelse {
+            try self.write("\"\"");
+            return;
+        };
+        const entry = map.get(ident) orelse {
+            try self.diags.emit(
+                .err,
+                .z0050_unknown_fn_in_effects_of,
+                .{ .start = 0, .end = 0 },
+                "@effectsOf: unknown same-file fn '{s}'",
+                .{ident},
+            );
+            try self.write("\"\"");
+            return;
+        };
+        try self.write("\"");
+        var first = true;
+        if (entry.alloc) {
+            try self.write("alloc");
+            first = false;
+        }
+        if (entry.io) {
+            if (!first) try self.write(",");
+            try self.write("io");
+            first = false;
+        }
+        if (entry.panic) {
+            if (!first) try self.write(",");
+            try self.write("panic");
+            first = false;
+        }
+        try self.write("\"");
+    }
+
     /// Emit `text` with `"` and `\` backslash-escaped so it is safe inside a
     /// Zig double-quoted string literal.
     fn writeEscaped(self: *Lowerer, text: []const u8) !void {
@@ -460,11 +525,38 @@ pub const Lowerer = struct {
     /// Rewrite a chunk of raw user code, applying the same Zig++ -> Zig
     /// substitutions as `writeRewrittenType` plus statement-level forms:
     ///   `move x` -> `x`
+    ///   `@effectsOf(<ident>)` -> `"alloc,io,panic"` literal (effects sema
+    ///                            inferred for the same-file fn `<ident>`)
     /// String literals and comments are passed through unchanged.
     fn writeRewrittenCode(self: *Lowerer, text: []const u8) !void {
         var i: usize = 0;
         while (i < text.len) {
             const c = text[i];
+            // `@effectsOf(<ident>)` -> `"<comma-separated-effects>"`. The
+            // identifier must name a fn declared in the same .zpp file;
+            // unknown names lower to `""` and emit Z0050. We try this
+            // before the `@import` branch so an `@effectsOf(...)` token
+            // never falls through into other `@`-handling.
+            if (c == '@' and substrAt(text, i, "@effectsOf(")) {
+                const start = i;
+                const name_start = i + "@effectsOf(".len;
+                var j = name_start;
+                while (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
+                const ident_start = j;
+                while (j < text.len and (std.ascii.isAlphanumeric(text[j]) or text[j] == '_')) j += 1;
+                const ident_end = j;
+                while (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
+                if (ident_end > ident_start and j < text.len and text[j] == ')') {
+                    const ident = text[ident_start..ident_end];
+                    try self.writeEffectsOfFor(ident);
+                    i = j + 1; // consume `)`
+                    continue;
+                }
+                // Malformed (e.g. `@effectsOf()` or no closing paren) —
+                // fall through and let the verbatim path emit it; sema
+                // will likely flag the call separately if it matters.
+                _ = start;
+            }
             // `@import("...zpp")` -> `@import("...zig")` so .zpp files can
             // reference each other directly. Done before the string-literal
             // pass-through so we can edit the path inside the quotes.
@@ -635,12 +727,28 @@ fn deriveFieldName(name: []const u8) []const u8 {
 }
 
 /// Convenience: lower a parsed file into a freshly-allocated string.
+/// `@effectsOf(<ident>)` substitutions resolve to `""` when called this
+/// way — pass an effect table via `lowerWithEffects` to enable real
+/// inferred-effect lookups.
 pub fn lower(
     allocator: std.mem.Allocator,
     file: *const ast.File,
     diags: *diag.Diagnostics,
 ) ![]u8 {
     var lw = Lowerer.init(allocator, diags);
+    defer lw.deinit();
+    return lw.lowerFile(file);
+}
+
+/// Same as `lower` but also wires the per-fn inferred-effect table so
+/// `@effectsOf(<ident>)` substitutions can resolve to the real string.
+pub fn lowerWithEffects(
+    allocator: std.mem.Allocator,
+    file: *const ast.File,
+    diags: *diag.Diagnostics,
+    effects: *const InferredEffectsMap,
+) ![]u8 {
+    var lw = Lowerer.initWithEffects(allocator, diags, effects);
     defer lw.deinit();
     return lw.lowerFile(file);
 }
@@ -700,4 +808,34 @@ test "lower impl-trait fn" {
     defer a.free(out);
     try std.testing.expect(std.mem.indexOf(u8, out, "w: anytype") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "comptime") == null);
+}
+
+test "lower @effectsOf substitutes the inferred string" {
+    // Direct unit test of the lowerer's `@effectsOf` rewrite given a
+    // hand-built effects table. Mirrors the end-to-end coverage in
+    // tests/diagnostics/diags.zig but exercises only this file's API
+    // so a regression here surfaces without the full pipeline.
+    const a = std.testing.allocator;
+    const parser = @import("parser.zig");
+    var diags = diag.Diagnostics.init(a);
+    defer diags.deinit();
+    var arena = ast.Arena.init(a);
+    defer arena.deinit();
+
+    var effects = InferredEffectsMap.init(a);
+    defer effects.deinit();
+    try effects.put("pure", .{});
+    try effects.put("noisy", .{ .alloc = true, .io = true });
+
+    const src =
+        \\fn pure() void {}
+        \\fn noisy() void {}
+        \\fn ask() []const u8 { return @effectsOf(pure); }
+        \\fn ask2() []const u8 { return @effectsOf(noisy); }
+    ;
+    const file = try parser.parseSource(a, src, &arena, &diags);
+    const out = try lowerWithEffects(a, &file, &diags, &effects);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "return \"\";") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "return \"alloc,io\";") != null);
 }

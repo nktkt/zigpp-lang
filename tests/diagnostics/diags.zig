@@ -247,3 +247,56 @@ test "Z0030: nopanic fn that panics fires" {
     defer result.diags.deinit();
     try std.testing.expect(hasCode(&result.diags, "Z0030"));
 }
+
+test "@effectsOf(pure) lowers to empty string" {
+    // Pure fn → @effectsOf(pure) substitutes to the literal `""`.
+    // Driving `compileToZig` exercises the end-to-end lowering path
+    // (sema → table → lowerer rewrite) the way real callers see it.
+    const a = std.testing.allocator;
+    var diags = compiler.Diagnostics.init(a);
+    defer diags.deinit();
+    const src =
+        \\fn pure() void {}
+        \\fn ask() []const u8 { return @effectsOf(pure); }
+    ;
+    const out = try compiler.compileToZig(a, src, &diags);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "return \"\";") != null);
+    try std.testing.expect(!hasCode(&diags, "Z0050"));
+}
+
+test "@effectsOf(allocOnly) lowers to \"alloc\"" {
+    // `allocOnly` calls `.alloc(` directly so sema records `.alloc`.
+    // The substitution must therefore become the literal `"alloc"`.
+    const a = std.testing.allocator;
+    var diags = compiler.Diagnostics.init(a);
+    defer diags.deinit();
+    const src =
+        \\const std = @import("std");
+        \\fn allocOnly(a: std.mem.Allocator) !void {
+        \\    const xs = try a.alloc(u8, 1);
+        \\    _ = xs;
+        \\}
+        \\fn ask() []const u8 { return @effectsOf(allocOnly); }
+    ;
+    const out = try compiler.compileToZig(a, src, &diags);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "return \"alloc\";") != null);
+    try std.testing.expect(!hasCode(&diags, "Z0050"));
+}
+
+test "Z0050: @effectsOf of an unknown fn fires and lowers to empty" {
+    // `unknown_fn` is not declared in this file. Sema/lowering still
+    // produces the empty-string substitution so callers compile, but
+    // emits Z0050 so the user knows the answer was synthesised.
+    const a = std.testing.allocator;
+    var diags = compiler.Diagnostics.init(a);
+    defer diags.deinit();
+    const src =
+        \\fn ask() []const u8 { return @effectsOf(unknown_fn); }
+    ;
+    const out = try compiler.compileToZig(a, src, &diags);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "return \"\";") != null);
+    try std.testing.expect(hasCode(&diags, "Z0050"));
+}

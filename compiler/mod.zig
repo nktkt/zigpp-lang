@@ -34,6 +34,9 @@ pub const SemaResult = sema.SemaResult;
 
 pub const Lowerer = lower_to_zig.Lowerer;
 pub const lower = lower_to_zig.lower;
+pub const lowerWithEffects = lower_to_zig.lowerWithEffects;
+pub const InferredEffects = sema.InferredEffects;
+pub const InferredEffectsMap = lower_to_zig.InferredEffectsMap;
 
 pub const locate = diagnostics.locate;
 
@@ -90,7 +93,10 @@ pub fn compileToZig(
     var s = sema.Sema.init(allocator, diags);
     var res = try s.analyze(&file);
     defer res.deinit();
-    return lower_to_zig.lower(allocator, &file, diags);
+    // Pass the per-fn inferred-effect table into the lowerer so
+    // `@effectsOf(<ident>)` substitutions can resolve. Z0050 is emitted
+    // for unknown names on the lowering side via this table.
+    return lower_to_zig.lowerWithEffects(allocator, &file, diags, &res.inferred_effects);
 }
 
 test "end-to-end compile sample" {
