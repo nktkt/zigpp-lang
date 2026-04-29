@@ -7,8 +7,13 @@ import {
   TransportKind,
 } from 'vscode-languageclient/node';
 
+const DOCS_URL = 'https://nktkt.github.io/zigpp-lang/';
+
 let client: LanguageClient | undefined;
 let outputChannel: vscode.OutputChannel | undefined;
+let statusBarItem: vscode.StatusBarItem | undefined;
+let zppVersion: string | undefined;
+let zppVersionResolved = false;
 
 function getOutputChannel(): vscode.OutputChannel {
   if (!outputChannel) {
@@ -177,6 +182,13 @@ function registerCommands(context: vscode.ExtensionContext): void {
     );
   });
 
+  const openDocsCommand = vscode.commands.registerCommand(
+    'zigpp.openDocs',
+    () => {
+      void vscode.env.openExternal(vscode.Uri.parse(DOCS_URL));
+    }
+  );
+
   const explainCommand = vscode.commands.registerCommand(
     'zigpp.explain',
     async (presupplied?: string) => {
@@ -236,7 +248,98 @@ function registerCommands(context: vscode.ExtensionContext): void {
     }
   );
 
-  context.subscriptions.push(runCommand, lowerCommand, explainCommand);
+  context.subscriptions.push(
+    runCommand,
+    lowerCommand,
+    explainCommand,
+    openDocsCommand
+  );
+}
+
+/**
+ * Spawn `zpp version` once and cache the trimmed first-line output.
+ * Resolves to undefined if the binary is not on PATH or exits non-zero.
+ */
+function detectZppVersion(): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let settled = false;
+    const finish = (value: string | undefined): void => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    try {
+      const proc = cp.spawn('zpp', ['version'], {
+        cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+      });
+      proc.stdout.setEncoding('utf8');
+      proc.stdout.on('data', (chunk: string) => {
+        stdout += chunk;
+      });
+      proc.on('error', () => finish(undefined));
+      proc.on('exit', (code) => {
+        if (code !== 0) {
+          finish(undefined);
+          return;
+        }
+        const first = stdout.split(/\r?\n/)[0]?.trim();
+        finish(first && first.length > 0 ? first : undefined);
+      });
+    } catch {
+      finish(undefined);
+    }
+  });
+}
+
+function updateStatusBarVisibility(): void {
+  if (!statusBarItem) return;
+  const editor = vscode.window.activeTextEditor;
+  if (editor && editor.document.languageId === 'zigpp') {
+    statusBarItem.show();
+  } else {
+    statusBarItem.hide();
+  }
+}
+
+function applyVersionToStatusBar(): void {
+  if (!statusBarItem) return;
+  if (zppVersion) {
+    statusBarItem.text = `Zig++ ${zppVersion}`;
+    statusBarItem.tooltip = `Zig++ ${zppVersion} — click to open the docs site.`;
+  } else {
+    statusBarItem.text = 'Zig++ (zpp not found)';
+    statusBarItem.tooltip =
+      "Couldn't run 'zpp version'. Make sure the 'zpp' binary is on your PATH " +
+      "(build with 'zig build' and symlink 'zig-out/bin/zpp'). " +
+      'Click to open the docs site.';
+  }
+}
+
+async function setupStatusBar(
+  context: vscode.ExtensionContext
+): Promise<void> {
+  statusBarItem = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Right,
+    100
+  );
+  statusBarItem.command = 'zigpp.openDocs';
+  statusBarItem.text = 'Zig++';
+  statusBarItem.tooltip = 'Zig++ — detecting zpp version…';
+  context.subscriptions.push(statusBarItem);
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(() =>
+      updateStatusBarVisibility()
+    )
+  );
+  updateStatusBarVisibility();
+
+  if (!zppVersionResolved) {
+    zppVersionResolved = true;
+    zppVersion = await detectZppVersion();
+  }
+  applyVersionToStatusBar();
+  updateStatusBarVisibility();
 }
 
 /**
@@ -291,10 +394,12 @@ export async function activate(
       { providedCodeActionKinds: ExplainCodeActionProvider.providedKinds }
     )
   );
+  void setupStatusBar(context);
   await startLanguageClient(context);
 }
 
 export async function deactivate(): Promise<void> {
+  statusBarItem = undefined;
   if (!client) {
     return;
   }
