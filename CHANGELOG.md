@@ -4,6 +4,15 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.22](https://github.com/nktkt/zigpp-lang/compare/v0.1.21...v0.1.22) (2026-04-29)
+
+
+### Features
+
+* **lsp:** completion support (keywords + top-level idents) ([aee3ab7](https://github.com/nktkt/zigpp-lang/commit/aee3ab766fd64ef84b9342dfe0a48137d5bb5a3c))
+* **sema:** Z0030 .io effect inference (round 2) ([9d24e3e](https://github.com/nktkt/zigpp-lang/commit/9d24e3e08449832238329be6e6e9452ff5607001))
+* **sema:** Z0030 effect inference for .io annotation ([43fd026](https://github.com/nktkt/zigpp-lang/commit/43fd0267fe429f2d39f8d6ecfc46b6480b2cc578))
+
 ## [0.1.21](https://github.com/nktkt/zigpp-lang/compare/v0.1.20...v0.1.21) (2026-04-29)
 
 
