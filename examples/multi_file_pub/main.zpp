@@ -1,0 +1,33 @@
+/// main.zpp — consumer of api.zpp's public surface.
+///
+/// Demonstrates calling into a sibling .zpp module via `@import`
+/// across both static (method on a pub struct) and dynamic
+/// (`zpp.Dyn(api.Logger_VTable)`) dispatch. The vtable instance
+/// `Logger_impl_for_StdoutLogger` is published from api.zpp via
+/// the same name (no namespacing because Zig++ lowering is flat
+/// per file).
+
+const std = @import("std");
+const zpp = @import("zpp");
+const api = @import("api.zpp");
+
+fn fanOut(loggers: []const zpp.Dyn(api.Logger_VTable), msg: []const u8) void {
+    for (loggers) |l| {
+        l.vtable.log(l.ptr, msg);
+    }
+}
+
+pub fn main() !void {
+    var stdout = api.StdoutLogger{ .prefix = "main" };
+    stdout.log("static dispatch via the injected method");
+
+    var prefixed = api.PrefixedLogger{ .inner_prefix = "audit", .suffix = "(end)" };
+
+    const chain = [_]zpp.Dyn(api.Logger_VTable){
+        zpp.Dyn(api.Logger_VTable).init(api.StdoutLogger, &stdout, &api.Logger_impl_for_StdoutLogger),
+        zpp.Dyn(api.Logger_VTable).init(api.PrefixedLogger, &prefixed, &api.Logger_impl_for_PrefixedLogger),
+    };
+    fanOut(&chain, "dynamic dispatch over the imported vtable instances");
+
+    std.debug.print("(cross-file pub trait + dyn dispatch)\n", .{});
+}

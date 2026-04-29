@@ -385,6 +385,39 @@ zig build multi-e2e
 # main: via @import("util.zpp")
 ```
 
+## Bonus — sharing a public API across files
+
+Mark a trait or struct `pub` and another `.zpp` file can use it via
+`@import`:
+
+```zig
+// api.zpp
+pub trait Logger { fn log(self, msg: []const u8) void; }
+pub const StdoutLogger = struct { prefix: []const u8 };
+impl Logger for StdoutLogger { fn log(self, msg) void { ... } }
+```
+
+```zig
+// main.zpp
+const api = @import("api.zpp");
+
+pub fn main() !void {
+    var l = api.StdoutLogger{ .prefix = "main" };
+    l.log("hello");
+
+    // dyn dispatch over the imported vtable instance:
+    const d = zpp.Dyn(api.Logger_VTable).init(
+        api.StdoutLogger, &l, &api.Logger_impl_for_StdoutLogger,
+    );
+    d.vtable.log(d.ptr, "via dyn");
+}
+```
+
+The lowerer emits `pub const Logger_VTable`, `pub const Logger`, and
+the `pub const Logger_impl_for_StdoutLogger` vtable instance — all
+reachable from the importing module. See `examples/multi_file_pub/`
+for the full worked example, runnable via `zig build multi-e2e`.
+
 ## Bonus — explaining a diagnostic code
 
 When the compiler prints a code like `Z0020`, you can ask the CLI for

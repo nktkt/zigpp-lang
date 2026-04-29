@@ -95,7 +95,8 @@ pub fn build(b: *std.Build) void {
 
     const multi_e2e_step = b.step("multi-e2e", "Build and run examples/multi_file/ as a 2-file project");
     if (main_exe) |exe| {
-        addMultiFileE2E(b, target, optimize, zpp_module, exe, multi_e2e_step);
+        addMultiFileE2E(b, target, optimize, zpp_module, exe, multi_e2e_step, "examples/multi_file", "main", "util");
+        addMultiFileE2E(b, target, optimize, zpp_module, exe, multi_e2e_step, "examples/multi_file_pub", "main", "api");
     }
     e2e_step.dependOn(multi_e2e_step);
 
@@ -270,30 +271,33 @@ fn addMultiFileE2E(
     zpp_module: *std.Build.Module,
     zpp_exe: *std.Build.Step.Compile,
     multi_step: *std.Build.Step,
+    dir_rel: []const u8,
+    main_stem: []const u8,
+    sibling_stem: []const u8,
 ) void {
-    const main_zpp = "examples/multi_file/main.zpp";
-    const util_zpp = "examples/multi_file/util.zpp";
+    const main_zpp = b.fmt("{s}/{s}.zpp", .{ dir_rel, main_stem });
+    const sibling_zpp = b.fmt("{s}/{s}.zpp", .{ dir_rel, sibling_stem });
 
     // If either file is missing, skip silently — keeps the step a no-op
     // for branches that have not added the example yet.
     std.fs.cwd().access(main_zpp, .{}) catch return;
-    std.fs.cwd().access(util_zpp, .{}) catch return;
+    std.fs.cwd().access(sibling_zpp, .{}) catch return;
 
     const lower_main = b.addRunArtifact(zpp_exe);
     lower_main.addArg("lower");
     lower_main.addFileArg(b.path(main_zpp));
     const main_lazy = lower_main.captureStdOut();
 
-    const lower_util = b.addRunArtifact(zpp_exe);
-    lower_util.addArg("lower");
-    lower_util.addFileArg(b.path(util_zpp));
-    const util_lazy = lower_util.captureStdOut();
+    const lower_sibling = b.addRunArtifact(zpp_exe);
+    lower_sibling.addArg("lower");
+    lower_sibling.addFileArg(b.path(sibling_zpp));
+    const sibling_lazy = lower_sibling.captureStdOut();
 
     // Bundle both lowered files into one directory so main.zig can
-    // resolve `@import("util.zig")` at the same path.
+    // resolve `@import("<sibling>.zig")` at the same path.
     const wf = b.addWriteFiles();
-    const main_zig = wf.addCopyFile(main_lazy, "main.zig");
-    _ = wf.addCopyFile(util_lazy, "util.zig");
+    const main_zig = wf.addCopyFile(main_lazy, b.fmt("{s}.zig", .{main_stem}));
+    _ = wf.addCopyFile(sibling_lazy, b.fmt("{s}.zig", .{sibling_stem}));
 
     const exe_mod = b.createModule(.{
         .root_source_file = main_zig,
@@ -301,8 +305,11 @@ fn addMultiFileE2E(
         .optimize = optimize,
     });
     exe_mod.addImport("zpp", zpp_module);
+
+    // Sanitize the dir name for use as an executable name.
+    const exe_name = b.fmt("e2e-{s}", .{std.fs.path.basename(dir_rel)});
     const exe = b.addExecutable(.{
-        .name = "e2e-multi-file",
+        .name = exe_name,
         .root_module = exe_mod,
     });
     const run_exe = b.addRunArtifact(exe);

@@ -1,0 +1,38 @@
+/// api.zpp — public Zig++ API exposed across files.
+///
+/// Showcases that `pub trait`, `pub impl` (vtable instances are always
+/// emitted `pub`), and plain `pub const X = struct { ... }` are all
+/// reachable from a sibling `.zpp` via `@import("api.zpp")`. The
+/// lowerer emits `pub const Logger_VTable = struct {...}`,
+/// `pub const Logger = zpp.Dyn(Logger_VTable)`, and
+/// `pub const Logger_impl_for_StdoutLogger: Logger_VTable = .{...}`,
+/// so the importing file can construct dyn pointers to the impls
+/// declared here.
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+pub trait Logger {
+    fn log(self, msg: []const u8) void;
+}
+
+pub const StdoutLogger = struct {
+    prefix: []const u8,
+};
+
+impl Logger for StdoutLogger {
+    fn log(self, msg: []const u8) void {
+        std.debug.print("[{s}] {s}\n", .{ self.prefix, msg });
+    }
+}
+
+pub const PrefixedLogger = struct {
+    inner_prefix: []const u8,
+    suffix: []const u8,
+};
+
+impl Logger for PrefixedLogger {
+    fn log(self, msg: []const u8) void {
+        std.debug.print(">> {s} | {s} {s}\n", .{ self.inner_prefix, msg, self.suffix });
+    }
+}
