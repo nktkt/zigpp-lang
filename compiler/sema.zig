@@ -44,6 +44,7 @@ pub const Sema = struct {
         try self.checkFunctions(file, &result);
         try self.checkEffectInference(file);
         try self.checkIoEffectInference(file);
+        try self.checkPanicEffectInference(file);
 
         return result;
     }
@@ -674,6 +675,129 @@ pub const Sema = struct {
             }
         }
     }
+
+    /// Round 3 of the effect-inference MVP: same shape as
+    /// `checkEffectInference` but for the `.panic` / `.nopanic` pair. Run as
+    /// a parallel pass after `.alloc` and `.io` so existing wiring stays
+    /// untouched.
+    ///
+    /// Heuristic for "direct panic": the body text contains any of these
+    /// substrings (after stripping strings / chars / `//` line comments):
+    ///   `@panic(`, `std.debug.assert(`, `std.debug.panic(`,
+    ///   `std.process.exit(`, plus a NARROWED check for `unreachable` —
+    ///   the bare keyword must follow either a newline or `=>` (so a
+    ///   switch arm `else => unreachable` counts but `a or unreachable`
+    ///   inside a long boolean chain does not). The narrowing keeps
+    ///   examples that mention `unreachable` only inside doc comments or
+    ///   quoted strings safe; the harness already strips strings so the
+    ///   primary risk was idiomatic boolean chains.
+    fn checkPanicEffectInference(self: *Sema, file: *const ast.File) !void {
+        var fns: std.ArrayList(*const ast.FnDecl) = .{};
+        defer fns.deinit(self.allocator);
+        for (file.decls) |*d| {
+            switch (d.*) {
+                .fn_decl => |*fd| try fns.append(self.allocator, fd),
+                .impl_block => |ib| for (ib.fns) |*fd| try fns.append(self.allocator, fd),
+                .owned_struct => |os| for (os.fns) |*fd| try fns.append(self.allocator, fd),
+                .struct_decl => |sd| for (sd.fns) |*fd| try fns.append(self.allocator, fd),
+                else => {},
+            }
+        }
+        if (fns.items.len == 0) return;
+
+        var name_to_idx = std.StringHashMap(usize).init(self.allocator);
+        defer name_to_idx.deinit();
+        for (fns.items, 0..) |fd, i| {
+            const gop = try name_to_idx.getOrPut(fd.sig.name);
+            if (!gop.found_existing) gop.value_ptr.* = i;
+        }
+
+        const N = fns.items.len;
+        const direct = try self.allocator.alloc(bool, N);
+        defer self.allocator.free(direct);
+        const direct_span = try self.allocator.alloc(diag.Span, N);
+        defer self.allocator.free(direct_span);
+        const inferred = try self.allocator.alloc(bool, N);
+        defer self.allocator.free(inferred);
+
+        const calls = try self.allocator.alloc(std.ArrayList(usize), N);
+        defer {
+            for (calls) |*c| c.deinit(self.allocator);
+            self.allocator.free(calls);
+        }
+        for (calls) |*c| c.* = .{};
+
+        for (fns.items, 0..) |fd, i| {
+            direct[i] = false;
+            direct_span[i] = fd.sig.span;
+            inferred[i] = false;
+            const body = fd.body orelse continue;
+            for (body.stmts) |s| {
+                const text = switch (s) {
+                    .raw => |r| r.text,
+                    .using_stmt => |u| u.init_text,
+                    .own_decl => |o| o.init_text,
+                    else => continue,
+                };
+                if (!direct[i] and bodyMayPanic(text)) {
+                    direct[i] = true;
+                    direct_span[i] = switch (s) {
+                        .raw => |r| r.span,
+                        .using_stmt => |u| u.span,
+                        .own_decl => |o| o.span,
+                        else => unreachable,
+                    };
+                }
+                try collectLocalCalls(text, &name_to_idx, &calls[i], self.allocator);
+            }
+            inferred[i] = direct[i];
+        }
+
+        var changed = true;
+        var rounds: usize = 0;
+        while (changed and rounds < N + 1) : (rounds += 1) {
+            changed = false;
+            for (fns.items, 0..) |_, i| {
+                if (inferred[i]) continue;
+                for (calls[i].items) |cid| {
+                    if (inferred[cid]) {
+                        inferred[i] = true;
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        for (fns.items, 0..) |fd, i| {
+            const ef = fd.sig.effects orelse continue;
+            var declared_nopanic = false;
+            for (ef.effects) |e| {
+                if (e.kind == .nopanic) declared_nopanic = true;
+            }
+            if (!declared_nopanic) continue;
+            if (!inferred[i]) continue;
+
+            const span = if (direct[i]) direct_span[i] else fd.sig.span;
+            if (direct[i]) {
+                try self.diags.emit(
+                    .err,
+                    .z0030_effect_violation,
+                    span,
+                    "fn '{s}' declared .nopanic but inferred .panic effect",
+                    .{fd.sig.name},
+                );
+            } else {
+                try self.diags.emit(
+                    .err,
+                    .z0030_effect_violation,
+                    span,
+                    "fn '{s}' declared .nopanic but inferred .panic effect (transitively via a callee)",
+                    .{fd.sig.name},
+                );
+            }
+        }
+    }
 };
 
 /// Heuristic: does `text` look like an allocator-using call? We check for
@@ -799,6 +923,101 @@ fn bodyDoesIO(text: []const u8) bool {
                 std.mem.eql(u8, text[i .. i + needle.len], needle))
             {
                 return true;
+            }
+        }
+        i += 1;
+    }
+    return false;
+}
+
+/// Heuristic for "this body may panic": scan `text` for any of the
+/// substrings below, after stripping string / char literals and `//` line
+/// comments. The set is intentionally small — keep it documented next to
+/// the docs/src/v0.2-plan.md "Effect inference" section before adding more.
+///
+///   `@panic(`, `std.debug.assert(`, `std.debug.panic(`,
+///   `std.process.exit(`, plus a NARROWED `unreachable` check (must
+///   appear at a stmt-like position — preceded by `\n` or `=>`).
+///
+/// The `unreachable` narrowing avoids firing on idiomatic Zig boolean
+/// chains like `cond or unreachable` inside expressions; it still
+/// catches the common switch-arm form `else => unreachable` and
+/// stand-alone `unreachable;` statements.
+fn bodyMayPanic(text: []const u8) bool {
+    const needles = [_][]const u8{
+        "@panic(",
+        "std.debug.assert(",
+        "std.debug.panic(",
+        "std.process.exit(",
+    };
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = text[i];
+        // Skip over double-quoted string literals.
+        if (c == '"') {
+            i += 1;
+            while (i < text.len) : (i += 1) {
+                if (text[i] == '\\' and i + 1 < text.len) { i += 1; continue; }
+                if (text[i] == '"') { i += 1; break; }
+            }
+            continue;
+        }
+        // Skip over char literals.
+        if (c == '\'') {
+            i += 1;
+            while (i < text.len and text[i] != '\'') : (i += 1) {
+                if (text[i] == '\\' and i + 1 < text.len) i += 1;
+            }
+            if (i < text.len) i += 1;
+            continue;
+        }
+        // Skip over `//` line comments.
+        if (c == '/' and i + 1 < text.len and text[i + 1] == '/') {
+            while (i < text.len and text[i] != '\n') i += 1;
+            continue;
+        }
+        // Try every fixed-string substring at this position.
+        inline for (needles) |needle| {
+            if (i + needle.len <= text.len and
+                std.mem.eql(u8, text[i .. i + needle.len], needle))
+            {
+                return true;
+            }
+        }
+        // Narrowed `unreachable` check: bare keyword at a stmt-like
+        // position. Must be preceded by either start-of-text, `\n`, `;`,
+        // `{`, `}`, or follow a `=>` (after optional whitespace) so that
+        // switch arms like `else => unreachable` count, but a chain like
+        // `(cond or unreachable)` does not.
+        if (c == 'u' and i + "unreachable".len <= text.len and
+            std.mem.eql(u8, text[i .. i + "unreachable".len], "unreachable"))
+        {
+            // It must be a whole token (not a prefix of `unreachableX`).
+            const after_idx = i + "unreachable".len;
+            const is_word_boundary_after = after_idx >= text.len or !isIdent(text[after_idx]);
+            // It must not be part of a longer identifier on the left.
+            const is_word_boundary_before = i == 0 or !isIdent(text[i - 1]);
+            if (is_word_boundary_after and is_word_boundary_before) {
+                // Walk backwards over spaces / tabs to find the previous
+                // non-space byte and decide whether the position looks
+                // statement-like.
+                var k: usize = i;
+                while (k > 0) {
+                    k -= 1;
+                    const pc = text[k];
+                    if (pc == ' ' or pc == '\t') continue;
+                    // `=>` arm form.
+                    if (pc == '>' and k > 0 and text[k - 1] == '=') return true;
+                    // Stmt boundaries.
+                    if (pc == '\n' or pc == ';' or pc == '{' or pc == '}') return true;
+                    break;
+                }
+                // If we walked all the way to the start of text it's also a
+                // statement-like position (bare body of a fn).
+                if (k == 0) {
+                    const pc = text[0];
+                    if (pc == ' ' or pc == '\t' or pc == '\n') return true;
+                }
             }
         }
         i += 1;

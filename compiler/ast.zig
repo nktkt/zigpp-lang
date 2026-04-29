@@ -40,7 +40,7 @@ pub const WhereClause = struct {
     span: diag.Span,
 };
 
-pub const EffectKind = enum { alloc, noalloc, io, noio, panic, custom };
+pub const EffectKind = enum { alloc, noalloc, io, noio, panic, nopanic, custom };
 
 pub const Effect = struct {
     kind: EffectKind,

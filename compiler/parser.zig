@@ -638,6 +638,8 @@ pub const Parser = struct {
                 .noio
             else if (std.mem.eql(u8, text, "panic"))
                 .panic
+            else if (std.mem.eql(u8, text, "nopanic"))
+                .nopanic
             else
                 .custom;
             try list.append(self.allocator, .{ .kind = kind, .text = text });
