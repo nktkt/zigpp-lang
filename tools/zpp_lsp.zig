@@ -180,7 +180,7 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
 
     if (std.mem.eql(u8, method, "initialize")) {
         const caps =
-            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"referencesProvider":true,"workspaceSymbolProvider":true,"renameProvider":{"prepareProvider":true},"completionProvider":{"triggerCharacters":[".",":"]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false},"codeActionProvider":{"codeActionKinds":["quickfix"]}},"serverInfo":{"name":"zpp-lsp","version":"0.7.0"}}
+            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"referencesProvider":true,"workspaceSymbolProvider":true,"renameProvider":{"prepareProvider":true},"completionProvider":{"triggerCharacters":[".",":"]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false},"codeActionProvider":{"codeActionKinds":["quickfix"]},"semanticTokensProvider":{"legend":{"tokenTypes":["keyword","string","number","comment","function","interface","struct","variable"],"tokenModifiers":["declaration"]},"full":true}},"serverInfo":{"name":"zpp-lsp","version":"0.8.0"}}
         ;
         try writeResult(server.allocator, id_text, caps);
         return;
@@ -248,6 +248,10 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
     }
     if (std.mem.eql(u8, method, "textDocument/codeAction")) {
         try onCodeAction(server, id_text, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/semanticTokens/full")) {
+        try onSemanticTokensFull(server, id_text, params);
         return;
     }
     if (obj.get("id") != null) {
@@ -1530,6 +1534,248 @@ fn renderCodeActions(allocator: std.mem.Allocator, actions: []const CodeActionDi
     return out.toOwnedSlice(allocator);
 }
 
+/// LSP semantic-tokens type indices. Order MUST match the legend advertised
+/// in the `initialize` response — VS Code keys off the legend order, not the
+/// names. See SemanticTokenType in
+/// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#semanticTokenTypes.
+const SemTokType = enum(u32) {
+    keyword = 0,
+    string = 1,
+    number = 2,
+    comment = 3,
+    function = 4,
+    interface = 5,
+    @"struct" = 6,
+    variable = 7,
+};
+
+/// Bitset of semantic-token modifiers. Only `declaration` is used in this
+/// MVP — extending requires bumping the legend order in `initialize`.
+const SemTokMod = struct {
+    pub const declaration: u32 = 1 << 0;
+};
+
+/// Absolute (pre-delta-encoding) semantic-token tuple. We collect these in
+/// source order, then convert to LSP's `[deltaLine, deltaStart, length, type,
+/// mod]` quintuples just before emitting.
+const AbsToken = struct {
+    line: u32,
+    char: u32,
+    length: u32,
+    token_type: u32,
+    token_mod: u32,
+};
+
+fn onSemanticTokensFull(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    const allocator = server.allocator;
+    const p = params orelse return writeResult(allocator, id_text, "{\"data\":[]}");
+    if (p != .object) return writeResult(allocator, id_text, "{\"data\":[]}");
+    const td = p.object.get("textDocument") orelse return writeResult(allocator, id_text, "{\"data\":[]}");
+    if (td != .object) return writeResult(allocator, id_text, "{\"data\":[]}");
+    const uri_v = td.object.get("uri") orelse return writeResult(allocator, id_text, "{\"data\":[]}");
+    if (uri_v != .string) return writeResult(allocator, id_text, "{\"data\":[]}");
+
+    const text = server.docs.get(uri_v.string) orelse {
+        try writeResult(allocator, id_text, "{\"data\":[]}");
+        return;
+    };
+
+    const data = buildSemanticTokens(allocator, text) catch {
+        try writeResult(allocator, id_text, "{\"data\":[]}");
+        return;
+    };
+    defer allocator.free(data);
+
+    const result = try std.fmt.allocPrint(allocator, "{{\"data\":{s}}}", .{data});
+    defer allocator.free(result);
+    try writeResult(allocator, id_text, result);
+}
+
+/// Classify a top-level decl name for semantic-tokens highlighting. We only
+/// distinguish the four buckets the legend exposes; everything else (locals,
+/// parameters, unknown idents) falls through to `variable` at the call site.
+fn declTokenType(decl: compiler.ast.TopDecl) ?SemTokType {
+    return switch (decl) {
+        .fn_decl => .function,
+        .trait, .extern_interface => .interface,
+        .owned_struct, .struct_decl => .@"struct",
+        .impl_block, .raw => null,
+    };
+}
+
+/// Build the LSP `data` JSON array (as an owned slice, e.g. `[1,2,3,4,5,...]`)
+/// for a `textDocument/semanticTokens/full` response. Returns `[]` (an empty
+/// array, no tokens) when the document fails to parse — partial syntax mid-
+/// edit is the common case in an LSP, and we'd rather drop highlighting than
+/// drop the connection.
+///
+/// Algorithm:
+///  1. Build a name -> token-type map from the parsed top-level decls so each
+///     identifier reference can be classified the same way as its declaration.
+///     Local variables, parameters, and unknown idents all fall through to
+///     `variable`.
+///  2. Lex the source. For every token, emit one `AbsToken` whose type is:
+///       - `keyword` for any `kw_*` kind
+///       - `string` for `string_literal`
+///       - `number` for `int_literal` / `float_literal`
+///       - `comment` for `line_comment` / `doc_comment`
+///       - the map-classified type for `ident` (or `variable` when missing)
+///       - skipped otherwise
+///     Identifiers immediately following `fn`, `trait`, `struct`, `owned`, or
+///     `extern interface` are flagged with the `declaration` modifier.
+///  3. Encode the absolute token list as LSP-relative `(deltaLine, deltaStart,
+///     length, type, mod)` quintuples and stringify the resulting `u32` flat
+///     array.
+fn buildSemanticTokens(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    // Step 1: classify top-level decl names. The map borrows identifier slices
+    // straight from `source` — same lifetime as the caller-owned text.
+    var name_kind = std.StringHashMap(SemTokType).init(allocator);
+    defer name_kind.deinit();
+
+    {
+        var diags = compiler.Diagnostics.init(allocator);
+        defer diags.deinit();
+        var arena = compiler.ast.Arena.init(allocator);
+        defer arena.deinit();
+        if (compiler.parseSource(allocator, source, &arena, &diags)) |file| {
+            for (file.decls) |decl| {
+                const t = declTokenType(decl) orelse continue;
+                const name: []const u8 = switch (decl) {
+                    .fn_decl => |fd| fd.sig.name,
+                    .trait => |tr| tr.name,
+                    .owned_struct => |os| os.name,
+                    .struct_decl => |sd| sd.name,
+                    .extern_interface => |ei| ei.name,
+                    .impl_block, .raw => unreachable,
+                };
+                _ = try name_kind.put(name, t);
+            }
+        } else |_| {}
+    }
+
+    // Step 2: lex + classify into absolute tuples in source order.
+    var lex_diags = compiler.Diagnostics.init(allocator);
+    defer lex_diags.deinit();
+    var lx = compiler.token.Lexer.init(source, &lex_diags);
+    var toks = lx.tokenizeAll(allocator) catch {
+        return allocator.dupe(u8, "[]");
+    };
+    defer toks.deinit(allocator);
+
+    var abs = std.ArrayList(AbsToken){};
+    defer abs.deinit(allocator);
+
+    // Sliding window over the previous non-comment kind, used to decide
+    // whether the current ident is a *declaration* site (e.g. the `helper` in
+    // `fn helper`). `extern interface Name` is a two-keyword prefix, so we
+    // also remember whether the previous-previous token was `extern`.
+    var prev_kind: ?compiler.token.TokenKind = null;
+    var prev_prev_kind: ?compiler.token.TokenKind = null;
+
+    for (toks.items) |t| {
+        if (t.kind == .eof) break;
+        if (t.span.end <= t.span.start) continue;
+
+        const tt: ?SemTokType = blk: {
+            switch (t.kind) {
+                .string_literal => break :blk .string,
+                .int_literal, .float_literal => break :blk .number,
+                .line_comment, .doc_comment => break :blk .comment,
+                .ident => {
+                    const slice = t.slice(source);
+                    if (name_kind.get(slice)) |mapped| break :blk mapped;
+                    break :blk .variable;
+                },
+                else => {
+                    if (@intFromEnum(t.kind) >= @intFromEnum(compiler.token.TokenKind.kw_const) and
+                        @intFromEnum(t.kind) <= @intFromEnum(compiler.token.TokenKind.kw_interface))
+                    {
+                        break :blk .keyword;
+                    }
+                    break :blk null;
+                },
+            }
+        };
+
+        if (tt) |type_val| {
+            var mod: u32 = 0;
+            if (t.kind == .ident) {
+                const is_decl_site = blk: {
+                    if (prev_kind) |pk| switch (pk) {
+                        .kw_fn, .kw_trait, .kw_struct, .kw_owned => break :blk true,
+                        .kw_interface => {
+                            // Only `extern interface Name` declares a new
+                            // interface; bare `interface` is treated as a
+                            // keyword-flagged context (e.g. `impl Trait for X`).
+                            if (prev_prev_kind) |ppk| {
+                                if (ppk == .kw_extern) break :blk true;
+                            }
+                            break :blk false;
+                        },
+                        else => break :blk false,
+                    };
+                    break :blk false;
+                };
+                if (is_decl_site) mod |= SemTokMod.declaration;
+            }
+
+            const lc = compiler.locate(source, t.span.start);
+            // Multi-line tokens (e.g. multi-line strings, `\\`-folded
+            // literals) would break LSP's "no token spans multiple lines"
+            // invariant. Drop those; the TextMate fallback covers them.
+            const lc_end = compiler.locate(source, t.span.end);
+            if (lc_end.line != lc.line) {
+                prev_prev_kind = prev_kind;
+                prev_kind = t.kind;
+                continue;
+            }
+
+            try abs.append(allocator, .{
+                .line = lc.line - 1,
+                .char = lc.col - 1,
+                .length = t.span.end - t.span.start,
+                .token_type = @intFromEnum(type_val),
+                .token_mod = mod,
+            });
+        }
+
+        // Track only "real" tokens for the decl-site lookahead — comments and
+        // whitespace shouldn't reset the `fn helper` adjacency.
+        switch (t.kind) {
+            .line_comment, .doc_comment => {},
+            else => {
+                prev_prev_kind = prev_kind;
+                prev_kind = t.kind;
+            },
+        }
+    }
+
+    // Step 3: encode as LSP-relative quintuples and stringify.
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    try out.append(allocator, '[');
+    var prev_line: u32 = 0;
+    var prev_char: u32 = 0;
+    var first = true;
+    for (abs.items) |a| {
+        const delta_line = a.line - prev_line;
+        const delta_start = if (delta_line == 0) a.char - prev_char else a.char;
+        if (!first) try out.append(allocator, ',');
+        first = false;
+        const buf = try std.fmt.allocPrint(
+            allocator,
+            "{d},{d},{d},{d},{d}",
+            .{ delta_line, delta_start, a.length, a.token_type, a.token_mod },
+        );
+        defer allocator.free(buf);
+        try out.appendSlice(allocator, buf);
+        prev_line = a.line;
+        prev_char = a.char;
+    }
+    try out.append(allocator, ']');
+    return out.toOwnedSlice(allocator);
+}
+
 fn onWorkspaceSymbol(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
     var query: []const u8 = "";
     if (params) |p| {
@@ -2236,6 +2482,146 @@ test "buildCodeActions skips ctx diagnostics with unknown codes" {
 
     const range: LspRange = .{ .start_line = 0, .start_col = 0, .end_line = 0, .end_col = 1 };
     const out = try buildCodeActions(a, &server, "file:///x.zpp", range, ctx_diags);
+    defer a.free(out);
+    try std.testing.expectEqualStrings("[]", out);
+}
+
+/// Parse a `buildSemanticTokens` JSON array (e.g. `[1,2,3,4,5,...]`) back
+/// into a flat `[]u32`. Caller owns the returned slice. Test-only — it does
+/// no validation beyond what `parseInt` already enforces.
+fn parseSemTokData(allocator: std.mem.Allocator, json: []const u8) ![]u32 {
+    var out = std.ArrayList(u32){};
+    defer out.deinit(allocator);
+    if (json.len < 2) return out.toOwnedSlice(allocator);
+    // Strip the surrounding `[` / `]`.
+    const inner = json[1 .. json.len - 1];
+    if (inner.len == 0) return out.toOwnedSlice(allocator);
+    var it = std.mem.splitScalar(u8, inner, ',');
+    while (it.next()) |chunk| {
+        const trimmed = std.mem.trim(u8, chunk, " ");
+        if (trimmed.len == 0) continue;
+        const v = try std.fmt.parseInt(u32, trimmed, 10);
+        try out.append(allocator, v);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+test "buildSemanticTokens emits a u32 array with quintuple cardinality" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn helper(x: usize) usize { return x + 1; }
+    ;
+    const json = try buildSemanticTokens(a, src);
+    defer a.free(json);
+    const data = try parseSemTokData(a, json);
+    defer a.free(data);
+    try std.testing.expect(data.len > 0);
+    // LSP requires the data array to come in groups of 5: `(deltaLine,
+    // deltaStart, length, type, mod)`.
+    try std.testing.expectEqual(@as(usize, 0), data.len % 5);
+}
+
+test "buildSemanticTokens first token deltaLine matches first source token" {
+    const a = std.testing.allocator;
+    // Lead with two blank lines so the first real token is on line 2.
+    const src =
+        \\
+        \\
+        \\fn helper() void {}
+    ;
+    const json = try buildSemanticTokens(a, src);
+    defer a.free(json);
+    const data = try parseSemTokData(a, json);
+    defer a.free(data);
+    try std.testing.expect(data.len >= 5);
+    // Source-relative: first token on line 2 (0-indexed) -> deltaLine = 2.
+    try std.testing.expectEqual(@as(u32, 2), data[0]);
+}
+
+test "buildSemanticTokens classifies `fn` as keyword (type 0)" {
+    const a = std.testing.allocator;
+    const src = "fn helper() void {}\n";
+    const json = try buildSemanticTokens(a, src);
+    defer a.free(json);
+    const data = try parseSemTokData(a, json);
+    defer a.free(data);
+    try std.testing.expect(data.len >= 5);
+    // First token is `fn`, length 2, type=keyword(0), mod=0.
+    try std.testing.expectEqual(@as(u32, 0), data[0]); // deltaLine
+    try std.testing.expectEqual(@as(u32, 0), data[1]); // deltaStart
+    try std.testing.expectEqual(@as(u32, 2), data[2]); // length
+    try std.testing.expectEqual(@as(u32, @intFromEnum(SemTokType.keyword)), data[3]);
+    try std.testing.expectEqual(@as(u32, 0), data[4]);
+}
+
+test "buildSemanticTokens flags fn name with declaration modifier" {
+    const a = std.testing.allocator;
+    const src = "fn helper(x: usize) usize { return x + 1; }\n";
+    const json = try buildSemanticTokens(a, src);
+    defer a.free(json);
+    const data = try parseSemTokData(a, json);
+    defer a.free(data);
+
+    // The tokens after `fn` are `helper`, `(`, `x`, `:`, `usize`, `)`,
+    // `usize`, `{`, `return`, `x`, `+`, `1`, `;`, `}`. Only those classified
+    // by our legend are emitted (keywords, idents, numbers). Walk the
+    // quintuples and verify:
+    //   - the first ident emitted ("helper") has type=function, mod=declaration
+    //   - subsequent occurrences of "x" have type=variable, mod=0
+    try std.testing.expect(data.len >= 10);
+    // Token #2 (after `fn`) should be `helper` — function, declaration.
+    try std.testing.expectEqual(@as(u32, @intFromEnum(SemTokType.function)), data[5 + 3]);
+    try std.testing.expectEqual(@as(u32, 1), data[5 + 4]); // declaration bit
+}
+
+test "buildSemanticTokens marks reused fn name as function without declaration" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn helper(x: usize) usize { return x + 1; }
+        \\pub fn main() void { _ = helper(2); }
+    ;
+    const json = try buildSemanticTokens(a, src);
+    defer a.free(json);
+    const data = try parseSemTokData(a, json);
+    defer a.free(data);
+
+    // Walk all quintuples and find every `helper` occurrence by re-scanning
+    // the source for its absolute (line, char) position, then verifying the
+    // matching tuple's type/mod. The reused `helper` must be type=function,
+    // mod=0 — declaration only fires at the decl site (the one immediately
+    // after `fn`).
+    var saw_decl = false;
+    var saw_use = false;
+    var line: u32 = 0;
+    var char: u32 = 0;
+    var i: usize = 0;
+    while (i + 5 <= data.len) : (i += 5) {
+        const dl = data[i];
+        const ds = data[i + 1];
+        const len = data[i + 2];
+        const ty = data[i + 3];
+        const mod = data[i + 4];
+        if (dl != 0) {
+            line += dl;
+            char = ds;
+        } else {
+            char += ds;
+        }
+        // Compute the byte offset for (line, char) the same way LSP would.
+        const off = posToOffset(src, line, char) orelse continue;
+        if (off + len > src.len) continue;
+        const slice = src[off .. off + len];
+        if (!std.mem.eql(u8, slice, "helper")) continue;
+        try std.testing.expectEqual(@as(u32, @intFromEnum(SemTokType.function)), ty);
+        if (mod & 1 != 0) saw_decl = true else saw_use = true;
+    }
+    try std.testing.expect(saw_decl);
+    try std.testing.expect(saw_use);
+}
+
+test "buildSemanticTokens returns [] on empty source" {
+    const a = std.testing.allocator;
+    const out = try buildSemanticTokens(a, "");
     defer a.free(out);
     try std.testing.expectEqualStrings("[]", out);
 }
