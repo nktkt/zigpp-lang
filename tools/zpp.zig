@@ -321,7 +321,8 @@ fn findZppLibUpward(allocator: std.mem.Allocator) !?[]u8 {
 }
 
 fn cmdBuild(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
-    const root: []const u8 = if (args.len == 0) "." else args[0];
+    const split = splitBuildArgs(args);
+    const root: []const u8 = if (split.zpp.len == 0) "." else split.zpp[0];
 
     var src_dir = std.fs.cwd().openDir(root, .{ .iterate = true }) catch |e| {
         ePrint("zpp build: cannot open '{s}': {s}\n", .{ root, @errorName(e) });
@@ -412,6 +413,8 @@ fn cmdBuild(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
         try argv_list.appendSlice(allocator, &.{ "--build-file", ".zpp-cache/build.zig" });
     }
 
+    for (split.passthrough) |a| try argv_list.append(allocator, a);
+
     var child = std.process.Child.init(argv_list.items, allocator);
     child.stdin_behavior = .Inherit;
     child.stdout_behavior = .Inherit;
@@ -421,6 +424,24 @@ fn cmdBuild(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
         return .user_error;
     };
     return termToExit(term);
+}
+
+const SplitArgs = struct {
+    zpp: [][:0]u8,
+    passthrough: [][:0]u8,
+};
+
+/// Split CLI args at the first `--`. Args before the separator are
+/// zpp-level (e.g. project dir); args after are forwarded to `zig
+/// build` so the user can write `zpp build -- run` or
+/// `zpp build src/ -- test --release=fast`.
+fn splitBuildArgs(args: [][:0]u8) SplitArgs {
+    for (args, 0..) |a, i| {
+        if (std.mem.eql(u8, a, "--")) {
+            return .{ .zpp = args[0..i], .passthrough = args[i + 1 ..] };
+        }
+    }
+    return .{ .zpp = args, .passthrough = args[args.len..] };
 }
 
 const ShimContext = struct {
@@ -823,6 +844,48 @@ test "sanitizeProjectName handles common basenames" {
     const empty = try sanitizeProjectName(a, "");
     defer a.free(empty);
     try std.testing.expectEqualStrings("a", empty);
+}
+
+test "splitBuildArgs separates at `--`" {
+    var src_buf: [4:0]u8 = .{ 's', 'r', 'c', '/' };
+    var sep_buf: [2:0]u8 = .{ '-', '-' };
+    var run_buf: [3:0]u8 = .{ 'r', 'u', 'n' };
+    var test_buf: [4:0]u8 = .{ 't', 'e', 's', 't' };
+
+    // Empty args.
+    var none: [0][:0]u8 = .{};
+    const e = splitBuildArgs(&none);
+    try std.testing.expectEqual(@as(usize, 0), e.zpp.len);
+    try std.testing.expectEqual(@as(usize, 0), e.passthrough.len);
+
+    // Only dir, no separator.
+    var only_dir = [_][:0]u8{&src_buf};
+    const od = splitBuildArgs(&only_dir);
+    try std.testing.expectEqual(@as(usize, 1), od.zpp.len);
+    try std.testing.expectEqualStrings("src/", od.zpp[0]);
+    try std.testing.expectEqual(@as(usize, 0), od.passthrough.len);
+
+    // dir `--` run test.
+    var with_sep = [_][:0]u8{ &src_buf, &sep_buf, &run_buf, &test_buf };
+    const ws = splitBuildArgs(&with_sep);
+    try std.testing.expectEqual(@as(usize, 1), ws.zpp.len);
+    try std.testing.expectEqualStrings("src/", ws.zpp[0]);
+    try std.testing.expectEqual(@as(usize, 2), ws.passthrough.len);
+    try std.testing.expectEqualStrings("run", ws.passthrough[0]);
+    try std.testing.expectEqualStrings("test", ws.passthrough[1]);
+
+    // Leading `--`: no zpp args, all forwarded.
+    var only_sep = [_][:0]u8{ &sep_buf, &run_buf };
+    const os = splitBuildArgs(&only_sep);
+    try std.testing.expectEqual(@as(usize, 0), os.zpp.len);
+    try std.testing.expectEqual(@as(usize, 1), os.passthrough.len);
+    try std.testing.expectEqualStrings("run", os.passthrough[0]);
+
+    // Trailing `--`: empty passthrough.
+    var trail = [_][:0]u8{ &src_buf, &sep_buf };
+    const t = splitBuildArgs(&trail);
+    try std.testing.expectEqual(@as(usize, 1), t.zpp.len);
+    try std.testing.expectEqual(@as(usize, 0), t.passthrough.len);
 }
 
 test "renderBuildShim substitutes name, entry, and lib path" {

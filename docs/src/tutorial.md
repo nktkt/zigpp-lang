@@ -358,6 +358,17 @@ zpp build
 ./.zpp-cache/zig-out/bin/<dirname>
 ```
 
+Anything after `--` is forwarded to the underlying `zig build`
+invocation, so the shortest "build and run" loop is:
+
+```sh
+zpp build -- run
+# lowers, builds, then runs the resulting executable
+```
+
+You can also forward any of the standard `zig build` flags, e.g.
+`zpp build -- --release=fast` or `zpp build -- test`.
+
 The shim is regenerated on every run, so editing it by hand is not
 useful — drop a real `build.zig` at the project root if you need to
 customize. `zpp init` scaffolds one (with `build.zig.zon` and the
