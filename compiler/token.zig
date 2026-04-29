@@ -306,6 +306,39 @@ pub const Lexer = struct {
         return Token{ .kind = .invalid, .span = .{ .start = start, .end = self.pos } };
     }
 
+    /// Caller has already advanced past the first backslash; pos points at
+    /// the second one. Consume until end-of-line, then peek the next
+    /// non-whitespace start-of-line: if it begins with `\\`, fold it in.
+    fn lexMultilineString(self: *Lexer, start: u32) Token {
+        // Consume the second '\' of the opening pair.
+        self.pos += 1;
+        // First line's content: skip until '\n'.
+        while (self.pos < self.source.len and self.source[self.pos] != '\n') {
+            self.pos += 1;
+        }
+        // Greedy fold: while the next line (after leading whitespace) also
+        // starts with `\\`, include it.
+        while (self.pos < self.source.len and self.source[self.pos] == '\n') {
+            const save = self.pos;
+            self.pos += 1; // consume \n
+            // Skip spaces / tabs.
+            while (self.pos < self.source.len and (self.source[self.pos] == ' ' or self.source[self.pos] == '\t')) {
+                self.pos += 1;
+            }
+            if (self.pos + 1 < self.source.len and self.source[self.pos] == '\\' and self.source[self.pos + 1] == '\\') {
+                self.pos += 2;
+                while (self.pos < self.source.len and self.source[self.pos] != '\n') {
+                    self.pos += 1;
+                }
+                continue;
+            }
+            // Not a continuation — restore pos to before the newline.
+            self.pos = save;
+            break;
+        }
+        return Token{ .kind = .string_literal, .span = .{ .start = start, .end = self.pos } };
+    }
+
     fn lexChar(self: *Lexer, start: u32) Token {
         while (self.pos < self.source.len) {
             const c = self.source[self.pos];
@@ -419,6 +452,25 @@ pub const Lexer = struct {
             },
             '"' => return try self.lexString(start),
             '\'' => return self.lexChar(start),
+            '\\' => {
+                // `\\...\n` (Zig's multi-line string form). Consecutive
+                // `\\`-prefixed lines fold into one string_literal token so
+                // the parser sees them as a single string and lowering
+                // passes them through verbatim.
+                if (self.pos < self.source.len and self.source[self.pos] == '\\') {
+                    return self.lexMultilineString(start);
+                }
+                // Stray single backslash falls through to the invalid-char
+                // diagnostic below.
+                try self.diags.emit(
+                    .err,
+                    .z0200_invalid_char,
+                    .{ .start = start, .end = self.pos },
+                    "invalid character: 0x{x:0>2}",
+                    .{c},
+                );
+                return tok(.invalid, start, self.pos);
+            },
             else => {
                 if (isIdentStart(c)) return self.lexIdent(start);
                 if (isDigit(c)) return self.lexNumber(start);
@@ -493,4 +545,33 @@ test "lex string and number" {
     try std.testing.expectEqual(TokenKind.int_literal, list.items[1].kind);
     try std.testing.expectEqual(TokenKind.int_literal, list.items[2].kind);
     try std.testing.expectEqual(TokenKind.float_literal, list.items[3].kind);
+}
+
+test "lex multi-line string folds consecutive lines" {
+    const a = std.testing.allocator;
+    var diags = diag.Diagnostics.init(a);
+    defer diags.deinit();
+    const src = "\\\\hello — world\n    \\\\second line\nconst x = 1;";
+    var lx = Lexer.init(src, &diags);
+    var list = try lx.tokenizeAll(a);
+    defer list.deinit(a);
+    try std.testing.expectEqual(TokenKind.string_literal, list.items[0].kind);
+    // The token must span both `\\`-prefixed lines, ending just before `const`.
+    const span = list.items[0].span;
+    try std.testing.expect(span.end > span.start);
+    try std.testing.expect(std.mem.indexOf(u8, src[span.start..span.end], "second line") != null);
+    try std.testing.expectEqual(@as(usize, 0), diags.count());
+}
+
+test "lex single-line multi-line string ends at first non-folding line" {
+    const a = std.testing.allocator;
+    var diags = diag.Diagnostics.init(a);
+    defer diags.deinit();
+    const src = "\\\\only one\nconst y = 2;";
+    var lx = Lexer.init(src, &diags);
+    var list = try lx.tokenizeAll(a);
+    defer list.deinit(a);
+    try std.testing.expectEqual(TokenKind.string_literal, list.items[0].kind);
+    try std.testing.expectEqual(TokenKind.kw_const, list.items[1].kind);
+    try std.testing.expectEqual(@as(usize, 0), diags.count());
 }
