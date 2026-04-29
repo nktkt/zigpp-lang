@@ -121,10 +121,12 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           Push-Location examples-consumer
-          $out = (zig build run) | Out-String
+          # std.debug.print writes to stderr; merge into stdout so we can grep.
+          $out = (zig build run 2>&1 | Out-String)
           Pop-Location
-          if ($out -notmatch "hello from a downstream Zig\+\+ consumer") { throw "downstream output missing" }
-          if ($out -notmatch "event hash = ") { throw "event hash missing" }
+          Write-Host $out
+          if ($out -notmatch [regex]::Escape("hello from a downstream Zig++ consumer")) { throw "downstream output missing" }
+          if ($out -notmatch [regex]::Escape("event hash = ")) { throw "event hash missing" }
 
       - name: zpp init scaffolds a working project (windows)
         if: runner.os == 'Windows'
