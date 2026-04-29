@@ -1,7 +1,7 @@
 /// effects_of.zpp — `@effectsOf(f)` queryable surface.
 ///
 /// Teaches: every same-file fn has an inferred effect set computed by
-/// sema's three inference passes (alloc / io / panic). The
+/// sema's four inference passes (alloc / io / panic / custom). The
 /// `@effectsOf(f)` builtin surfaces that set as a comma-separated
 /// `[]const u8` you can read at comptime (or at runtime, since the
 /// substitution is just a string literal). Useful for programmatic
@@ -12,9 +12,10 @@
 ///     // each `@effectsOf(<ident>)` becomes a `[]const u8` literal
 ///     // synthesised at lowering time. Pure fns produce `""`; fns
 ///     // that allocate produce `"alloc"`; combinations are joined
-///     // with `,` in a fixed order (alloc, io, panic).
+///     // with `,` in a fixed order (alloc, io, panic, custom("X")...).
 ///     std.debug.print("pure -> {s}\n", .{""});
 ///     std.debug.print("noisy -> {s}\n", .{"alloc,io"});
+///     std.debug.print("networking -> {s}\n", .{"custom(\"net\")"});
 
 const std = @import("std");
 const zpp = @import("zpp");
@@ -32,23 +33,36 @@ fn noisy(a: std.mem.Allocator) !void {
     std.debug.print("noisy: allocated {d} bytes\n", .{buf.len});
 }
 
+effects(.custom("net")) fn networking() void {
+    // No body content needed — the `.custom("net")` annotation alone
+    // seeds the inferred set so `@effectsOf(networking)` lowers to
+    // `"custom(\"net\")"`. Useful for tagging fns that talk to the
+    // network without wiring a full sema heuristic.
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // The two literals below are produced by the lowerer at compile
-    // time — `@effectsOf(pure)` becomes the literal `""`, and
-    // `@effectsOf(noisy)` becomes `"alloc,io"`. No runtime work is
-    // performed to compute them.
+    // The three literals below are produced by the lowerer at compile
+    // time — `@effectsOf(pure)` becomes the literal `""`,
+    // `@effectsOf(noisy)` becomes `"alloc,io"`, and
+    // `@effectsOf(networking)` becomes `"custom(\"net\")"`. No runtime
+    // work is performed to compute them.
     const pure_effects: []const u8 = @effectsOf(pure);
     const noisy_effects: []const u8 = @effectsOf(noisy);
+    const net_effects: []const u8 = @effectsOf(networking);
 
-    std.debug.print("@effectsOf(pure)  = \"{s}\"\n", .{pure_effects});
-    std.debug.print("@effectsOf(noisy) = \"{s}\"\n", .{noisy_effects});
+    std.debug.print("@effectsOf(pure)       = \"{s}\"\n", .{pure_effects});
+    std.debug.print("@effectsOf(noisy)      = \"{s}\"\n", .{noisy_effects});
+    std.debug.print("@effectsOf(networking) = \"{s}\"\n", .{net_effects});
 
     // Drive `noisy` once so the allocator path is actually exercised.
     try noisy(allocator);
+
+    // Drive `networking` once so the call is observable in the binary.
+    networking();
 
     // Use `pure` so the compiler doesn't strip it.
     std.debug.print("pure(7) = {x}\n", .{pure(7)});
