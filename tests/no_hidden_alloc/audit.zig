@@ -35,8 +35,16 @@ fn auditTree(allocator: std.mem.Allocator, root: []const u8, offenders: *std.Arr
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.path, ".zig")) continue;
 
-        const rel = try std.fs.path.join(allocator, &.{ root, entry.path });
+        // Force forward-slash join so the comparison against
+        // `allowed_main_entries` (which uses `/`) works on Windows too,
+        // where `std.fs.path.join` would emit `\` separators.
+        const rel = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ root, entry.path });
         defer allocator.free(rel);
+        // Normalise any embedded backslashes from `entry.path` on Windows
+        // hosts that traverse into subdirectories.
+        for (rel) |*c| if (c.* == '\\') {
+            c.* = '/';
+        };
 
         if (isAllowed(rel)) continue;
 
