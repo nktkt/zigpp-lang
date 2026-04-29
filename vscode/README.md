@@ -63,7 +63,15 @@ official Zig extension.
   implements `textDocument/codeAction` natively, so the same affordance
   is available in any LSP client (Vim, Emacs, Helix, Neovim) — not just
   VS Code. The original client-side provider remains registered as a
-  fallback for diagnostics that pre-date the LSP-driven path.
+  fallback for diagnostics that pre-date the LSP-driven path. Z0010
+  (owned struct missing `deinit`) and Z0040 (impl missing trait
+  method(s)) additionally ship a `WorkspaceEdit`-based **auto-fix**
+  alongside the explain entry: pick "Auto-fix: add `pub fn deinit` stub"
+  to insert a `pub fn deinit(self: *@This()) void { _ = self; }` body
+  before the struct's closing brace, or "Auto-fix: stub missing trait
+  method(s)" to drop a `pub fn <name>(...) void { unreachable; }` per
+  missing trait method into the impl block. Auto-fixes are intentionally
+  minimal stubs — review and fill in the bodies before saving.
 - **Semantic highlighting** (`textDocument/semanticTokens/full`,
   `range`, and `full/delta`): the language server emits per-token
   classifications (keyword, string, number, comment, function,
@@ -142,13 +150,15 @@ code --install-extension zigpp-0.1.0.vsix
   same-file `textDocument/definition`, same-file `textDocument/references`,
   `workspace/symbol` over open documents, same-file
   `textDocument/rename` (top-level decl names only),
-  `textDocument/codeAction` (quick-fix `Explain Z####` per diagnostic),
-  and `textDocument/semanticTokens/{full,range,full/delta}` (full,
-  viewport-restricted, and incremental highlighting). Cross-file
-  go-to-definition, cross-file references, cross-file rename, rename
-  of parameters / locals / method names, workspace search across
-  un-opened files, context-aware completion, method-on-receiver
-  navigation, and `WorkspaceEdit`-style auto-fix code actions are
+  `textDocument/codeAction` (quick-fix `Explain Z####` per diagnostic
+  for every code, plus `WorkspaceEdit` auto-fix entries for Z0010 and
+  Z0040), and `textDocument/semanticTokens/{full,range,full/delta}`
+  (full, viewport-restricted, and incremental highlighting).
+  Cross-file go-to-definition, cross-file references, cross-file
+  rename, rename of parameters / locals / method names, workspace
+  search across un-opened files, context-aware completion,
+  method-on-receiver navigation, and auto-fix code actions for the
+  remaining diagnostic codes (Z0020, Z0021, Z0030, Z0050, Z0060) are
   not implemented yet.
 - Semantic highlighting now ships from the LSP. The TextMate grammar
   remains as a fallback for clients that don't speak semantic tokens, for
