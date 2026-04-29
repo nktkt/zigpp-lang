@@ -1,0 +1,53 @@
+/// borrow_check.zpp — demonstrates Z0021: borrow invalidated by move.
+///
+/// The MVP borrow checker (compiler/sema.zig) tracks the FIRST `&x` per
+/// fn body. When a later `move x` fires while that borrow is recorded,
+/// sema emits Z0021. Re-binding `x` (e.g. `own var x = ...` again with
+/// a different name) clears the borrow record.
+///
+/// Run:
+///   zpp run examples/borrow_check.zpp
+///
+/// The compilable code below shows the SAFE shape (no live borrow at
+/// move time). The commented BAD block at the bottom shows what trips
+/// Z0021 if you uncomment it.
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+owned struct Token {
+    id: u32,
+
+    pub fn deinit(self: *Token) void {
+        _ = self;
+    }
+}
+
+fn consume(t: own Token) void {
+    own var local = move t;
+    std.debug.print("consumed token id={d}\n", .{local.id});
+    local.deinit();
+}
+
+pub fn main() !void {
+    // SAFE: no borrow recorded against `seven`, so the move below is fine.
+    own var seven = Token{ .id = 0 };
+    seven.id = 7;
+    consume(move seven);
+
+    // SAFE: `peek_id` is a value copy (not `&peek`), so no borrow is recorded.
+    own var peek = Token{ .id = 0 };
+    peek.id = 8;
+    const peek_id = peek.id;
+    std.debug.print("peek id={d}\n", .{peek_id});
+    consume(move peek);
+
+    // ----------------------------------------------------------------
+    // BAD — uncomment to see Z0021 fire from `zpp check`:
+    //
+    //     own var doomed = Token{ .id = 9 };
+    //     const ref = &doomed;       // records a borrow on `doomed`
+    //     std.debug.print("ref id={d}\n", .{ref.id});
+    //     consume(move doomed);      // Z0021: cannot move 'doomed' while borrowed
+    // ----------------------------------------------------------------
+}
