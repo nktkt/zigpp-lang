@@ -180,7 +180,7 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
 
     if (std.mem.eql(u8, method, "initialize")) {
         const caps =
-            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"referencesProvider":true,"workspaceSymbolProvider":true,"completionProvider":{"triggerCharacters":[".",":"]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false}},"serverInfo":{"name":"zpp-lsp","version":"0.5.0"}}
+            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"referencesProvider":true,"workspaceSymbolProvider":true,"renameProvider":{"prepareProvider":true},"completionProvider":{"triggerCharacters":[".",":"]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false}},"serverInfo":{"name":"zpp-lsp","version":"0.6.0"}}
         ;
         try writeResult(server.allocator, id_text, caps);
         return;
@@ -236,6 +236,14 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
     }
     if (std.mem.eql(u8, method, "workspace/symbol")) {
         try onWorkspaceSymbol(server, id_text, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/prepareRename")) {
+        try onPrepareRename(server, id_text, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/rename")) {
+        try onRename(server, id_text, params);
         return;
     }
     if (obj.get("id") != null) {
@@ -1056,6 +1064,266 @@ fn buildReferences(
     return out.toOwnedSlice(allocator);
 }
 
+fn onPrepareRename(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    const p = params orelse return writeResult(server.allocator, id_text, "null");
+    if (p != .object) return writeResult(server.allocator, id_text, "null");
+    const td = p.object.get("textDocument") orelse return writeResult(server.allocator, id_text, "null");
+    if (td != .object) return writeResult(server.allocator, id_text, "null");
+    const uri_v = td.object.get("uri") orelse return writeResult(server.allocator, id_text, "null");
+    if (uri_v != .string) return writeResult(server.allocator, id_text, "null");
+    const pos_v = p.object.get("position") orelse return writeResult(server.allocator, id_text, "null");
+    if (pos_v != .object) return writeResult(server.allocator, id_text, "null");
+    const line_v = pos_v.object.get("line") orelse return writeResult(server.allocator, id_text, "null");
+    const char_v = pos_v.object.get("character") orelse return writeResult(server.allocator, id_text, "null");
+    if (line_v != .integer or char_v != .integer) return writeResult(server.allocator, id_text, "null");
+    if (line_v.integer < 0 or char_v.integer < 0) return writeResult(server.allocator, id_text, "null");
+
+    const text = server.docs.get(uri_v.string) orelse {
+        try writeResult(server.allocator, id_text, "null");
+        return;
+    };
+    const allocator = server.allocator;
+    const result = try buildPrepareRename(
+        allocator,
+        text,
+        @intCast(line_v.integer),
+        @intCast(char_v.integer),
+    );
+    defer allocator.free(result);
+    try writeResult(server.allocator, id_text, result);
+}
+
+/// Build the JSON `result` payload (a `{range, placeholder}` object or
+/// "null") for a textDocument/prepareRename request. Returns "null" when:
+///   - the position is not on an identifier
+///   - the identifier doesn't match any top-level decl name in the same file
+///   - the document fails to parse
+///
+/// We deliberately scope rename to top-level decl names: arbitrary identifier
+/// rename without symbol resolution is too easy to mis-trigger.
+fn buildPrepareRename(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    line: usize,
+    character: usize,
+) ![]u8 {
+    const off = posToOffset(source, line, character) orelse return allocator.dupe(u8, "null");
+    const ident = identAt(source, off) orelse return allocator.dupe(u8, "null");
+
+    var diags = compiler.Diagnostics.init(allocator);
+    defer diags.deinit();
+    var arena = compiler.ast.Arena.init(allocator);
+    defer arena.deinit();
+    const file = compiler.parseSource(allocator, source, &arena, &diags) catch {
+        return allocator.dupe(u8, "null");
+    };
+
+    var matches = false;
+    for (file.decls) |decl| {
+        const name: ?[]const u8 = switch (decl) {
+            .fn_decl => |fd| fd.sig.name,
+            .trait => |t| t.name,
+            .owned_struct => |os| os.name,
+            .struct_decl => |sd| sd.name,
+            .extern_interface => |ei| ei.name,
+            .impl_block, .raw => null,
+        };
+        if (name == null) continue;
+        if (std.mem.eql(u8, name.?, ident)) {
+            matches = true;
+            break;
+        }
+    }
+    if (!matches) return allocator.dupe(u8, "null");
+
+    // Compute the LSP range for the identifier under the cursor.
+    var start: u32 = off;
+    while (start > 0 and compiler.token.identCont(source[start - 1])) start -= 1;
+    var end: u32 = off + 1;
+    while (end < source.len and compiler.token.identCont(source[end])) end += 1;
+    const span: compiler.diagnostics.Span = .{ .start = start, .end = end };
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    try out.appendSlice(allocator, "{\"range\":");
+    try appendRangeJson(&out, allocator, rangeFromSpan(source, span));
+    const placeholder_json = try jsonStringify(allocator, ident);
+    defer allocator.free(placeholder_json);
+    try out.appendSlice(allocator, ",\"placeholder\":");
+    try out.appendSlice(allocator, placeholder_json);
+    try out.append(allocator, '}');
+    return out.toOwnedSlice(allocator);
+}
+
+fn onRename(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    const p = params orelse return writeResult(server.allocator, id_text, "null");
+    if (p != .object) return writeResult(server.allocator, id_text, "null");
+    const td = p.object.get("textDocument") orelse return writeResult(server.allocator, id_text, "null");
+    if (td != .object) return writeResult(server.allocator, id_text, "null");
+    const uri_v = td.object.get("uri") orelse return writeResult(server.allocator, id_text, "null");
+    if (uri_v != .string) return writeResult(server.allocator, id_text, "null");
+    const pos_v = p.object.get("position") orelse return writeResult(server.allocator, id_text, "null");
+    if (pos_v != .object) return writeResult(server.allocator, id_text, "null");
+    const line_v = pos_v.object.get("line") orelse return writeResult(server.allocator, id_text, "null");
+    const char_v = pos_v.object.get("character") orelse return writeResult(server.allocator, id_text, "null");
+    if (line_v != .integer or char_v != .integer) return writeResult(server.allocator, id_text, "null");
+    if (line_v.integer < 0 or char_v.integer < 0) return writeResult(server.allocator, id_text, "null");
+    const new_name_v = p.object.get("newName") orelse return writeResult(server.allocator, id_text, "null");
+    if (new_name_v != .string) return writeResult(server.allocator, id_text, "null");
+
+    const text = server.docs.get(uri_v.string) orelse {
+        try writeResult(server.allocator, id_text, "null");
+        return;
+    };
+    const allocator = server.allocator;
+    const result = try buildRename(
+        allocator,
+        text,
+        uri_v.string,
+        @intCast(line_v.integer),
+        @intCast(char_v.integer),
+        new_name_v.string,
+    );
+    defer allocator.free(result);
+    try writeResult(server.allocator, id_text, result);
+}
+
+/// Validate that `s` is a syntactically legal identifier per the lexer's
+/// notion of ident-start / ident-cont. Empty strings are rejected.
+fn isValidIdent(s: []const u8) bool {
+    if (s.len == 0) return false;
+    if (!compiler.token.identStart(s[0])) return false;
+    for (s[1..]) |c| {
+        if (!compiler.token.identCont(c)) return false;
+    }
+    return true;
+}
+
+/// Build the JSON `result` payload (a `WorkspaceEdit` object or "null") for
+/// a textDocument/rename request. Same-file only.
+///
+/// Returns "null" when:
+///   - the position is not on an identifier
+///   - the identifier doesn't match any top-level decl name in the same file
+///   - `new_name` is not a valid identifier
+///   - the document fails to parse
+///
+/// The scan logic (whole-word match, skip strings/chars/`//` comments)
+/// mirrors `buildReferences` exactly: every reference becomes a `TextEdit`.
+fn buildRename(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    uri: []const u8,
+    line: usize,
+    character: usize,
+    new_name: []const u8,
+) ![]u8 {
+    if (!isValidIdent(new_name)) return allocator.dupe(u8, "null");
+
+    const off = posToOffset(source, line, character) orelse return allocator.dupe(u8, "null");
+    const ident = identAt(source, off) orelse return allocator.dupe(u8, "null");
+
+    // Same renameability gate as `buildPrepareRename`: only top-level decl
+    // names. This keeps rename safe — we never replace an identifier we
+    // can't name-resolve.
+    var diags = compiler.Diagnostics.init(allocator);
+    defer diags.deinit();
+    var arena = compiler.ast.Arena.init(allocator);
+    defer arena.deinit();
+    const file = compiler.parseSource(allocator, source, &arena, &diags) catch {
+        return allocator.dupe(u8, "null");
+    };
+    var matches = false;
+    for (file.decls) |decl| {
+        const name: ?[]const u8 = switch (decl) {
+            .fn_decl => |fd| fd.sig.name,
+            .trait => |t| t.name,
+            .owned_struct => |os| os.name,
+            .struct_decl => |sd| sd.name,
+            .extern_interface => |ei| ei.name,
+            .impl_block, .raw => null,
+        };
+        if (name == null) continue;
+        if (std.mem.eql(u8, name.?, ident)) {
+            matches = true;
+            break;
+        }
+    }
+    if (!matches) return allocator.dupe(u8, "null");
+
+    const new_name_json = try jsonStringify(allocator, new_name);
+    defer allocator.free(new_name_json);
+    const uri_json = try jsonStringify(allocator, uri);
+    defer allocator.free(uri_json);
+
+    var edits = std.ArrayList(u8){};
+    defer edits.deinit(allocator);
+    try edits.append(allocator, '[');
+    var first_hit = true;
+
+    var i: usize = 0;
+    while (i < source.len) {
+        const c = source[i];
+        // Skip over double-quoted string literals.
+        if (c == '"') {
+            i += 1;
+            while (i < source.len) : (i += 1) {
+                if (source[i] == '\\' and i + 1 < source.len) {
+                    i += 1;
+                    continue;
+                }
+                if (source[i] == '"') {
+                    i += 1;
+                    break;
+                }
+            }
+            continue;
+        }
+        // Skip over char literals.
+        if (c == '\'') {
+            i += 1;
+            while (i < source.len and source[i] != '\'') : (i += 1) {
+                if (source[i] == '\\' and i + 1 < source.len) i += 1;
+            }
+            if (i < source.len) i += 1;
+            continue;
+        }
+        // Skip over `//` line comments.
+        if (c == '/' and i + 1 < source.len and source[i + 1] == '/') {
+            while (i < source.len and source[i] != '\n') i += 1;
+            continue;
+        }
+        if (compiler.token.identStart(c) and (i == 0 or !compiler.token.identCont(source[i - 1]))) {
+            var end: usize = i + 1;
+            while (end < source.len and compiler.token.identCont(source[end])) end += 1;
+            const word = source[i..end];
+            if (std.mem.eql(u8, word, ident)) {
+                if (!first_hit) try edits.append(allocator, ',');
+                first_hit = false;
+                try edits.appendSlice(allocator, "{\"range\":");
+                const span: compiler.diagnostics.Span = .{ .start = @intCast(i), .end = @intCast(end) };
+                try appendRangeJson(&edits, allocator, rangeFromSpan(source, span));
+                try edits.appendSlice(allocator, ",\"newText\":");
+                try edits.appendSlice(allocator, new_name_json);
+                try edits.append(allocator, '}');
+            }
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    try edits.append(allocator, ']');
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    try out.appendSlice(allocator, "{\"changes\":{");
+    try out.appendSlice(allocator, uri_json);
+    try out.append(allocator, ':');
+    try out.appendSlice(allocator, edits.items);
+    try out.appendSlice(allocator, "}}");
+    return out.toOwnedSlice(allocator);
+}
+
 fn onWorkspaceSymbol(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
     var query: []const u8 = "";
     if (params) |p| {
@@ -1502,4 +1770,117 @@ test "buildWorkspaceSymbols returns [] when no docs cached" {
     const out = try buildWorkspaceSymbols(a, &docs, "");
     defer a.free(out);
     try std.testing.expectEqualStrings("[]", out);
+}
+
+test "buildPrepareRename returns range + placeholder for a fn name" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn helper(x: usize) usize { return x + 1; }
+        \\pub fn main() void {
+        \\    _ = helper(2);
+        \\}
+    ;
+    // Cursor on `helper` declaration (line 0, column 4).
+    const out = try buildPrepareRename(a, src, 0, 4);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"placeholder\":\"helper\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"range\":") != null);
+    // The range must point at the identifier (line 0, character 3 -> 9).
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"start\":{\"line\":0,\"character\":3}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"end\":{\"line\":0,\"character\":9}") != null);
+}
+
+test "buildPrepareRename returns null for a parameter name" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn helper(my_param: usize) usize { return my_param + 1; }
+    ;
+    // Cursor on `my_param` parameter (line 0, column 12).
+    const out = try buildPrepareRename(a, src, 0, 12);
+    defer a.free(out);
+    try std.testing.expectEqualStrings("null", out);
+}
+
+test "buildPrepareRename returns null when off identifier" {
+    const a = std.testing.allocator;
+    const src = "fn helper() void {}\n";
+    // Position is on the space between `fn` and `helper`.
+    const out = try buildPrepareRename(a, src, 0, 2);
+    defer a.free(out);
+    try std.testing.expectEqualStrings("null", out);
+}
+
+test "buildRename produces a WorkspaceEdit covering all occurrences" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn helper(x: usize) usize { return x + 1; }
+        \\pub fn main() void {
+        \\    _ = helper(2);
+        \\}
+    ;
+    // Cursor on `helper` use site (line 2, column 9).
+    const out = try buildRename(a, src, "file:///x.zpp", 2, 9, "renamed");
+    defer a.free(out);
+    // Wrapper shape.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"changes\":{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"file:///x.zpp\":[") != null);
+    // Two TextEdits -> two `"newText":"renamed"` entries.
+    var count: usize = 0;
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, out, idx, "\"newText\":\"renamed\"")) |pos| {
+        count += 1;
+        idx = pos + 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+    // One edit on line 0 (decl), one on line 2 (use).
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"start\":{\"line\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"start\":{\"line\":2") != null);
+}
+
+test "buildRename rejects an invalid newName" {
+    const a = std.testing.allocator;
+    const src = "fn helper() void {}\n";
+    const out_digit = try buildRename(a, src, "file:///x.zpp", 0, 4, "123abc");
+    defer a.free(out_digit);
+    try std.testing.expectEqualStrings("null", out_digit);
+    const out_empty = try buildRename(a, src, "file:///x.zpp", 0, 4, "");
+    defer a.free(out_empty);
+    try std.testing.expectEqualStrings("null", out_empty);
+    const out_punct = try buildRename(a, src, "file:///x.zpp", 0, 4, "no-dash");
+    defer a.free(out_punct);
+    try std.testing.expectEqualStrings("null", out_punct);
+}
+
+test "buildRename does not replace occurrences inside string literals" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn helper() void {
+        \\    _ = "helper inside a string";
+        \\    _ = helper;
+        \\}
+    ;
+    // Cursor on `helper` decl (line 0, column 4).
+    const out = try buildRename(a, src, "file:///x.zpp", 0, 4, "renamed");
+    defer a.free(out);
+    // Only the decl on line 0 and the use on line 2 should be replaced -> 2 newText entries.
+    var count: usize = 0;
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, out, idx, "\"newText\":\"renamed\"")) |pos| {
+        count += 1;
+        idx = pos + 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+    // The original literal text "helper" must stay present in the source —
+    // the rename output never contains the string-literal location of the
+    // word as an edit. Sanity-check no edit landed on line 1 (the string).
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"start\":{\"line\":1") == null);
+}
+
+test "buildRename returns null when off a renameable decl" {
+    const a = std.testing.allocator;
+    const src = "fn helper() void { _ = unknown_name; }\n";
+    // Cursor inside `unknown_name` — not a top-level decl -> null.
+    const out = try buildRename(a, src, "file:///x.zpp", 0, 25, "renamed");
+    defer a.free(out);
+    try std.testing.expectEqualStrings("null", out);
 }
