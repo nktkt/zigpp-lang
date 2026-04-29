@@ -32,6 +32,14 @@ official Zig extension.
 - **Go to definition** (`textDocument/definition`): jump from a use of a
   top-level identifier to its declaration in the same file. Cross-file
   resolution and method-on-receiver resolution are not implemented yet.
+- **Find all references** (`textDocument/references`): list every same-file
+  occurrence of the identifier under the cursor, skipping string literals,
+  char literals, and `//` line comments. Honours `includeDeclaration`.
+- **Workspace symbol search** (`workspace/symbol`): case-insensitive
+  substring filter over top-level decls (functions, traits, structs, owned
+  structs, extern interfaces, impl blocks) across every currently-open
+  document. Use VS Code's "Go to Symbol in Workspace" (`Ctrl+T` /
+  `Cmd+T`) to invoke it.
 - "Run current file" command that shells out to `zpp run` and streams output
   to the Zig++ output channel.
 - "Show lowered Zig" command that opens the result of `zpp lower` in a new
@@ -110,9 +118,11 @@ code --install-extension zigpp-0.1.0.vsix
   `zpp` parser/sema and supports `textDocument/formatting`,
   `textDocument/hover`, `textDocument/documentSymbol` (Outline view), a
   context-free `textDocument/completion` (keywords + top-level decl names),
-  and same-file `textDocument/definition`. Workspace symbol search,
-  cross-file go-to-definition, context-aware completion, method-on-receiver
-  navigation, and rename are not implemented yet.
+  same-file `textDocument/definition`, same-file `textDocument/references`,
+  and `workspace/symbol` over open documents. Cross-file go-to-definition,
+  cross-file references, workspace search across un-opened files,
+  context-aware completion, method-on-receiver navigation, and rename are
+  not implemented yet.
 - Semantic highlighting falls back to the TextMate grammar — there's no
   semantic-tokens server response yet.
 - The grammar uses a heuristic (PascalCase identifier) for type names. In

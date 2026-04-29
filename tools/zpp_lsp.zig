@@ -180,7 +180,7 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
 
     if (std.mem.eql(u8, method, "initialize")) {
         const caps =
-            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"completionProvider":{"triggerCharacters":[".",":"]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false}},"serverInfo":{"name":"zpp-lsp","version":"0.4.0"}}
+            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"referencesProvider":true,"workspaceSymbolProvider":true,"completionProvider":{"triggerCharacters":[".",":"]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false}},"serverInfo":{"name":"zpp-lsp","version":"0.5.0"}}
         ;
         try writeResult(server.allocator, id_text, caps);
         return;
@@ -228,6 +228,14 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
     }
     if (std.mem.eql(u8, method, "textDocument/definition")) {
         try onDefinition(server, id_text, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/references")) {
+        try onReferences(server, id_text, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "workspace/symbol")) {
+        try onWorkspaceSymbol(server, id_text, params);
         return;
     }
     if (obj.get("id") != null) {
@@ -881,6 +889,283 @@ fn buildDefinition(
     return allocator.dupe(u8, "null");
 }
 
+fn onReferences(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    const p = params orelse return writeResult(server.allocator, id_text, "[]");
+    if (p != .object) return writeResult(server.allocator, id_text, "[]");
+    const td = p.object.get("textDocument") orelse return writeResult(server.allocator, id_text, "[]");
+    if (td != .object) return writeResult(server.allocator, id_text, "[]");
+    const uri_v = td.object.get("uri") orelse return writeResult(server.allocator, id_text, "[]");
+    if (uri_v != .string) return writeResult(server.allocator, id_text, "[]");
+    const pos_v = p.object.get("position") orelse return writeResult(server.allocator, id_text, "[]");
+    if (pos_v != .object) return writeResult(server.allocator, id_text, "[]");
+    const line_v = pos_v.object.get("line") orelse return writeResult(server.allocator, id_text, "[]");
+    const char_v = pos_v.object.get("character") orelse return writeResult(server.allocator, id_text, "[]");
+    if (line_v != .integer or char_v != .integer) return writeResult(server.allocator, id_text, "[]");
+    if (line_v.integer < 0 or char_v.integer < 0) return writeResult(server.allocator, id_text, "[]");
+
+    // Default per LSP spec is `true` when context is absent.
+    var include_declaration: bool = true;
+    if (p.object.get("context")) |ctx| {
+        if (ctx == .object) {
+            if (ctx.object.get("includeDeclaration")) |inc| {
+                if (inc == .bool) include_declaration = inc.bool;
+            }
+        }
+    }
+
+    const text = server.docs.get(uri_v.string) orelse {
+        try writeResult(server.allocator, id_text, "[]");
+        return;
+    };
+    const allocator = server.allocator;
+    const result = try buildReferences(
+        allocator,
+        text,
+        uri_v.string,
+        @intCast(line_v.integer),
+        @intCast(char_v.integer),
+        include_declaration,
+    );
+    defer allocator.free(result);
+    try writeResult(server.allocator, id_text, result);
+}
+
+/// Build the JSON `result` array for a textDocument/references request.
+/// Same-file only: scans `source` for whole-word matches of the identifier
+/// under the cursor, skipping string literals, char literals, and `//` line
+/// comments. When `include_declaration` is false, drops the occurrence whose
+/// span overlaps the matched top-level decl's name span.
+///
+/// Returns "[]" when:
+///   - the position is not on an identifier
+///   - the identifier matches no occurrences
+fn buildReferences(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    uri: []const u8,
+    line: usize,
+    character: usize,
+    include_declaration: bool,
+) ![]u8 {
+    const off = posToOffset(source, line, character) orelse return allocator.dupe(u8, "[]");
+    const ident = identAt(source, off) orelse return allocator.dupe(u8, "[]");
+
+    // Locate the matched top-level decl's name span (if any) so we can drop
+    // it when `includeDeclaration == false`. We try to parse, but a parse
+    // failure just means we treat all hits as references (no decl to skip).
+    var decl_name_off: ?u32 = null;
+    var decl_name_len: usize = 0;
+    var diags = compiler.Diagnostics.init(allocator);
+    defer diags.deinit();
+    var arena = compiler.ast.Arena.init(allocator);
+    defer arena.deinit();
+    if (compiler.parseSource(allocator, source, &arena, &diags)) |file| {
+        for (file.decls) |decl| {
+            const name: ?[]const u8 = switch (decl) {
+                .fn_decl => |fd| fd.sig.name,
+                .trait => |t| t.name,
+                .owned_struct => |os| os.name,
+                .struct_decl => |sd| sd.name,
+                .extern_interface => |ei| ei.name,
+                .impl_block, .raw => null,
+            };
+            if (name == null) continue;
+            if (!std.mem.eql(u8, name.?, ident)) continue;
+            // Identifier text is borrowed from the source buffer — its
+            // pointer offset is therefore the byte offset of the decl name
+            // occurrence we want to skip.
+            const name_ptr = @intFromPtr(name.?.ptr);
+            const src_ptr = @intFromPtr(source.ptr);
+            if (name_ptr >= src_ptr and name_ptr < src_ptr + source.len) {
+                decl_name_off = @intCast(name_ptr - src_ptr);
+                decl_name_len = name.?.len;
+            }
+            break;
+        }
+    } else |_| {}
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    try out.append(allocator, '[');
+    var first_hit = true;
+
+    const uri_json = try jsonStringify(allocator, uri);
+    defer allocator.free(uri_json);
+
+    var i: usize = 0;
+    while (i < source.len) {
+        const c = source[i];
+        // Skip over double-quoted string literals.
+        if (c == '"') {
+            i += 1;
+            while (i < source.len) : (i += 1) {
+                if (source[i] == '\\' and i + 1 < source.len) {
+                    i += 1;
+                    continue;
+                }
+                if (source[i] == '"') {
+                    i += 1;
+                    break;
+                }
+            }
+            continue;
+        }
+        // Skip over char literals.
+        if (c == '\'') {
+            i += 1;
+            while (i < source.len and source[i] != '\'') : (i += 1) {
+                if (source[i] == '\\' and i + 1 < source.len) i += 1;
+            }
+            if (i < source.len) i += 1;
+            continue;
+        }
+        // Skip over `//` line comments.
+        if (c == '/' and i + 1 < source.len and source[i + 1] == '/') {
+            while (i < source.len and source[i] != '\n') i += 1;
+            continue;
+        }
+        // Look for an ident-start at i with left-boundary, then match
+        // the full word and compare to `ident`.
+        if (compiler.token.identStart(c) and (i == 0 or !compiler.token.identCont(source[i - 1]))) {
+            var end: usize = i + 1;
+            while (end < source.len and compiler.token.identCont(source[end])) end += 1;
+            const word = source[i..end];
+            if (std.mem.eql(u8, word, ident)) {
+                const skip_decl = if (decl_name_off) |dno|
+                    !include_declaration and i == dno and word.len == decl_name_len
+                else
+                    false;
+                if (!skip_decl) {
+                    if (!first_hit) try out.append(allocator, ',');
+                    first_hit = false;
+                    try out.appendSlice(allocator, "{\"uri\":");
+                    try out.appendSlice(allocator, uri_json);
+                    try out.appendSlice(allocator, ",\"range\":");
+                    const span: compiler.diagnostics.Span = .{ .start = @intCast(i), .end = @intCast(end) };
+                    try appendRangeJson(&out, allocator, rangeFromSpan(source, span));
+                    try out.append(allocator, '}');
+                }
+            }
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+
+    try out.append(allocator, ']');
+    return out.toOwnedSlice(allocator);
+}
+
+fn onWorkspaceSymbol(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    var query: []const u8 = "";
+    if (params) |p| {
+        if (p == .object) {
+            if (p.object.get("query")) |q| {
+                if (q == .string) query = q.string;
+            }
+        }
+    }
+    const allocator = server.allocator;
+    const result = try buildWorkspaceSymbols(allocator, &server.docs, query);
+    defer allocator.free(result);
+    try writeResult(server.allocator, id_text, result);
+}
+
+/// Build the `result` JSON array for a workspace/symbol request: a
+/// `SymbolInformation[]` derived from every cached open document. `query`
+/// is a case-insensitive substring filter over the symbol name; an empty
+/// string emits all symbols. Returns "[]" when no docs are cached.
+fn buildWorkspaceSymbols(
+    allocator: std.mem.Allocator,
+    docs: *const DocStore,
+    query: []const u8,
+) ![]u8 {
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    try out.append(allocator, '[');
+    var first = true;
+
+    var it = docs.iterator();
+    while (it.next()) |entry| {
+        const uri = entry.key_ptr.*;
+        const source = entry.value_ptr.*;
+        try appendWorkspaceSymbolsForDoc(allocator, &out, &first, uri, source, query);
+    }
+
+    try out.append(allocator, ']');
+    return out.toOwnedSlice(allocator);
+}
+
+fn appendWorkspaceSymbolsForDoc(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    first: *bool,
+    uri: []const u8,
+    source: []const u8,
+    query: []const u8,
+) !void {
+    var diags = compiler.Diagnostics.init(allocator);
+    defer diags.deinit();
+    var arena = compiler.ast.Arena.init(allocator);
+    defer arena.deinit();
+    const file = compiler.parseSource(allocator, source, &arena, &diags) catch return;
+
+    const uri_json = try jsonStringify(allocator, uri);
+    defer allocator.free(uri_json);
+
+    for (file.decls) |decl| {
+        const item: ?struct { name: []const u8, kind: SymbolKind, owns_name: bool } = switch (decl) {
+            .fn_decl => |fd| .{ .name = fd.sig.name, .kind = .function, .owns_name = false },
+            .trait => |t| .{ .name = t.name, .kind = .interface, .owns_name = false },
+            .owned_struct => |os| .{ .name = os.name, .kind = .@"struct", .owns_name = false },
+            .struct_decl => |sd| .{ .name = sd.name, .kind = .@"struct", .owns_name = false },
+            .extern_interface => |ei| .{ .name = ei.name, .kind = .module, .owns_name = false },
+            .impl_block => |ib| blk: {
+                const label = try std.fmt.allocPrint(allocator, "impl {s} for {s}", .{ ib.trait_name, ib.target_type });
+                break :blk .{ .name = label, .kind = .class, .owns_name = true };
+            },
+            .raw => null,
+        };
+        if (item == null) continue;
+        const it_val = item.?;
+        defer if (it_val.owns_name) allocator.free(it_val.name);
+
+        if (!matchesQuery(it_val.name, query)) continue;
+
+        if (!first.*) try out.append(allocator, ',');
+        first.* = false;
+
+        const name_json = try jsonStringify(allocator, it_val.name);
+        defer allocator.free(name_json);
+
+        try out.appendSlice(allocator, "{\"name\":");
+        try out.appendSlice(allocator, name_json);
+        const kind_buf = try std.fmt.allocPrint(allocator, ",\"kind\":{d},\"location\":{{\"uri\":", .{@intFromEnum(it_val.kind)});
+        defer allocator.free(kind_buf);
+        try out.appendSlice(allocator, kind_buf);
+        try out.appendSlice(allocator, uri_json);
+        try out.appendSlice(allocator, ",\"range\":");
+        try appendRangeJson(out, allocator, rangeFromSpan(source, decl.span()));
+        try out.appendSlice(allocator, "},\"containerName\":\"\"}");
+    }
+}
+
+/// Case-insensitive substring match. Empty `query` matches everything.
+fn matchesQuery(name: []const u8, query: []const u8) bool {
+    if (query.len == 0) return true;
+    if (query.len > name.len) return false;
+    var i: usize = 0;
+    const last = name.len - query.len;
+    while (i <= last) : (i += 1) {
+        var j: usize = 0;
+        while (j < query.len) : (j += 1) {
+            if (std.ascii.toLower(name[i + j]) != std.ascii.toLower(query[j])) break;
+        }
+        if (j == query.len) return true;
+    }
+    return false;
+}
+
 fn countLines(s: []const u8) usize {
     var n: usize = 0;
     for (s) |c| if (c == '\n') {
@@ -1081,4 +1366,140 @@ test "buildDefinition returns null when off identifier" {
     const out = try buildDefinition(a, src, "file:///x.zpp", 0, 2);
     defer a.free(out);
     try std.testing.expectEqualStrings("null", out);
+}
+
+test "buildReferences returns 2 occurrences of an ident (decl + use)" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn helper(x: usize) usize { return x + 1; }
+        \\pub fn main() void {
+        \\    _ = helper(2);
+        \\}
+    ;
+    // Cursor on `helper` at the use site (line 2, column 9).
+    const out = try buildReferences(a, src, "file:///x.zpp", 2, 9, true);
+    defer a.free(out);
+    // Two ranges -> exactly two `"uri":` entries.
+    var count: usize = 0;
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, out, idx, "\"uri\":")) |pos| {
+        count += 1;
+        idx = pos + 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+    // First hit must be on line 0 (the declaration); second on line 2.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"start\":{\"line\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"start\":{\"line\":2") != null);
+}
+
+test "buildReferences with includeDeclaration=false drops the decl" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn helper(x: usize) usize { return x + 1; }
+        \\pub fn main() void {
+        \\    _ = helper(2);
+        \\}
+    ;
+    const out = try buildReferences(a, src, "file:///x.zpp", 2, 9, false);
+    defer a.free(out);
+    // One Location -> one `"uri":` entry.
+    var count: usize = 0;
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, out, idx, "\"uri\":")) |pos| {
+        count += 1;
+        idx = pos + 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
+    // The remaining hit is the use site on line 2.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"start\":{\"line\":2") != null);
+    // The decl on line 0 must NOT appear.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"start\":{\"line\":0") == null);
+}
+
+test "buildReferences skips occurrences inside string literals" {
+    const a = std.testing.allocator;
+    // The literal "helper" inside the string MUST NOT count as a reference.
+    const src =
+        \\fn helper() void {
+        \\    _ = "helper inside a string";
+        \\    _ = helper;
+        \\}
+    ;
+    // Cursor on `helper` decl (line 0, column 4).
+    const out = try buildReferences(a, src, "file:///x.zpp", 0, 4, true);
+    defer a.free(out);
+    var count: usize = 0;
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, out, idx, "\"uri\":")) |pos| {
+        count += 1;
+        idx = pos + 1;
+    }
+    // Decl on line 0 + use on line 2 = 2; the in-string occurrence is skipped.
+    try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+test "buildReferences returns [] when off identifier" {
+    const a = std.testing.allocator;
+    const src = "fn helper() void {}\n";
+    // Position on the space between `fn` and `helper`.
+    const out = try buildReferences(a, src, "file:///x.zpp", 0, 2, true);
+    defer a.free(out);
+    try std.testing.expectEqualStrings("[]", out);
+}
+
+test "buildWorkspaceSymbols with empty query returns all top-level decls" {
+    const a = std.testing.allocator;
+    const src =
+        \\trait Writer { fn write(self, bytes: []const u8) !usize; }
+        \\struct Counter {
+        \\    n: usize,
+        \\    pub fn bump(self: *Counter) void { self.n += 1; }
+        \\}
+        \\fn helper(x: usize) usize { return x + 1; }
+        \\impl Writer for Counter { pub fn write(self: *Counter, bytes: []const u8) !usize { _ = self; return bytes.len; } }
+    ;
+    var docs = DocStore.init(a);
+    defer docs.deinit();
+    try docs.put("file:///x.zpp", @constCast(src[0..]));
+
+    const out = try buildWorkspaceSymbols(a, &docs, "");
+    defer a.free(out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"name\":\"Writer\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"name\":\"Counter\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"name\":\"helper\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"name\":\"impl Writer for Counter\"") != null);
+    // Each entry has a `containerName` field per LSP SymbolInformation.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"containerName\":\"\"") != null);
+    // Each entry has a `location` with the doc URI.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"uri\":\"file:///x.zpp\"") != null);
+}
+
+test "buildWorkspaceSymbols with non-empty query filters case-insensitively" {
+    const a = std.testing.allocator;
+    const src =
+        \\trait Writer { fn write(self, bytes: []const u8) !usize; }
+        \\struct Counter { n: usize, pub fn bump(self: *Counter) void { self.n += 1; } }
+        \\fn helper(x: usize) usize { return x + 1; }
+    ;
+    var docs = DocStore.init(a);
+    defer docs.deinit();
+    try docs.put("file:///x.zpp", @constCast(src[0..]));
+
+    // Case-insensitive substring match on `count` should match `Counter`
+    // and nothing else.
+    const out = try buildWorkspaceSymbols(a, &docs, "count");
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"name\":\"Counter\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"name\":\"Writer\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"name\":\"helper\"") == null);
+}
+
+test "buildWorkspaceSymbols returns [] when no docs cached" {
+    const a = std.testing.allocator;
+    var docs = DocStore.init(a);
+    defer docs.deinit();
+    const out = try buildWorkspaceSymbols(a, &docs, "");
+    defer a.free(out);
+    try std.testing.expectEqualStrings("[]", out);
 }
