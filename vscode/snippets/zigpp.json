@@ -104,5 +104,40 @@
       "}"
     ],
     "description": "Standard Zig++ entry point."
+  },
+  "using_arena": {
+    "prefix": "using_arena",
+    "body": ["using ${1:arena} = zpp.ArenaScope.init(${2:allocator});"],
+    "description": "RAII arena scope; auto-frees on scope exit."
+  },
+  "dyn_init": {
+    "prefix": "dyn_init",
+    "body": [
+      "zpp.Dyn(${1:VTable}).init(${2:Type}, &${3:val}, &${1:VTable}_impl_for_${2:Type})"
+    ],
+    "description": "Construct a dyn-dispatch trait object from a concrete value + vtable impl."
+  },
+  "task_group": {
+    "prefix": "task_group",
+    "body": [
+      "var ${1:group} = zpp.async_mod.TaskGroup.init(${2:allocator});",
+      "defer ${1:group}.deinit();",
+      "$0"
+    ],
+    "description": "Structured-concurrency task group with deferred deinit."
+  },
+  "effects_pure": {
+    "prefix": "effects_pure",
+    "body": ["effects(.noalloc, .noio)"],
+    "description": "Pure effect annotation: forbids allocation and I/O."
+  },
+  "pub_trait": {
+    "prefix": "pub_trait",
+    "body": [
+      "pub trait ${1:Name} {",
+      "    fn ${2:method}(self, ${3:args}) ${4:ret};",
+      "}"
+    ],
+    "description": "Public Zig++ trait declaration."
   }
 }

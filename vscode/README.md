@@ -26,7 +26,8 @@ official Zig extension.
   untitled `.zig` editor so you can see exactly what the compiler emits.
 - **Snippets** for `trait`, `impl`, `owned struct`, `using`, `dyn`,
   `derive`, `requires`, `ensures`, `effects`, `extern interface`, `own`,
-  and a `main` boilerplate. Type the prefix and press `Tab`.
+  `main`, plus `using_arena`, `dyn_init`, `task_group`, `effects_pure`,
+  and `pub_trait`. Type the prefix and press `Tab`.
 - **Hover with explanations**: hovering over a diagnostic line shows the
   long-form explanation of the diagnostic code plus a link to the docs
   site reference.
@@ -35,6 +36,12 @@ official Zig extension.
   open the long-form text in the output channel.
 - "Explain Diagnostic Code" command (`Cmd/Ctrl+Shift+E`) for direct
   lookup by code.
+- **Status bar item** that displays the detected `zpp` version (or a
+  hint when `zpp` is not on `PATH`) whenever a `.zpp` file is active.
+  Click it to jump straight to the docs.
+- **"Open Docs" command** (`zigpp.openDocs`, `Cmd/Ctrl+Shift+D`) opens
+  the [Zig++ docs site](https://nktkt.github.io/zigpp-lang/) in your
+  browser.
 - Bracket matching, auto-closing pairs, and word-pattern tuned for Zig
   identifiers.
 
@@ -82,6 +89,8 @@ code --install-extension zigpp-0.1.0.vsix
 | --- | --- | --- |
 | `Zig++: Run Current File` (`zigpp.run`) | `Ctrl+F5` (`Cmd+F5` on macOS) | Run `zpp run` on the active document and stream output. |
 | `Zig++: Show Lowered Zig` (`zigpp.lower`) | `Ctrl+Shift+L` (`Cmd+Shift+L` on macOS) | Run `zpp lower` and open the emitted Zig in a new editor. |
+| `Zig++: Explain Diagnostic Code` (`zigpp.explain`) | `Ctrl+Shift+E` (`Cmd+Shift+E` on macOS) | Look up the long-form explanation for a `Z####` diagnostic. |
+| `Zig++: Open Docs` (`zigpp.openDocs`) | `Ctrl+Shift+D` (`Cmd+Shift+D` on macOS) | Open the Zig++ docs site in your default browser. |
 
 ## Known limitations
 

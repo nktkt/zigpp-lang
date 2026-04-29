@@ -81,6 +81,11 @@
         "command": "zigpp.explain",
         "title": "Zig++: Explain Diagnostic Code",
         "category": "Zig++"
+      },
+      {
+        "command": "zigpp.openDocs",
+        "title": "Zig++: Open Docs",
+        "category": "Zig++"
       }
     ],
     "keybindings": [
@@ -101,6 +106,11 @@
         "key": "ctrl+shift+e",
         "mac": "cmd+shift+e",
         "when": "editorTextFocus && editorLangId == zigpp"
+      },
+      {
+        "command": "zigpp.openDocs",
+        "key": "ctrl+shift+d",
+        "mac": "cmd+shift+d"
       }
     ]
   },
