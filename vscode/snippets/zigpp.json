@@ -1,0 +1,108 @@
+{
+  "trait": {
+    "prefix": "trait",
+    "body": [
+      "trait ${1:Name} {",
+      "    fn ${2:method}(self) ${3:void};",
+      "}"
+    ],
+    "description": "Declare a Zig++ trait."
+  },
+  "impl": {
+    "prefix": "impl",
+    "body": [
+      "impl ${1:Trait} for ${2:Type} {",
+      "    fn ${3:method}(self) ${4:void} {",
+      "        $0",
+      "    }",
+      "}"
+    ],
+    "description": "Implement a trait for a type."
+  },
+  "owned struct": {
+    "prefix": "owned",
+    "body": [
+      "owned struct ${1:Name} {",
+      "    ${2:field}: ${3:T},",
+      "",
+      "    pub fn init(${4:args}) ${1:Name} {",
+      "        return .{ .${2:field} = ${5:value} };",
+      "    }",
+      "",
+      "    pub fn deinit(self: *${1:Name}) void {",
+      "        $0",
+      "    }",
+      "}"
+    ],
+    "description": "Declare an owned struct with deinit."
+  },
+  "using": {
+    "prefix": "using",
+    "body": ["using ${1:name} = ${2:expr};"],
+    "description": "RAII binder; lowers to var + defer deinit."
+  },
+  "dyn fn": {
+    "prefix": "fndyn",
+    "body": [
+      "fn ${1:name}(${2:arg}: dyn ${3:Trait}) ${4:void} {",
+      "    $0",
+      "}"
+    ],
+    "description": "Function taking a dyn-dispatched trait object."
+  },
+  "impl trait fn": {
+    "prefix": "fnimpl",
+    "body": [
+      "fn ${1:name}(${2:arg}: impl ${3:Trait}) ${4:void} {",
+      "    $0",
+      "}"
+    ],
+    "description": "Function taking a static-dispatched trait parameter."
+  },
+  "derive": {
+    "prefix": "derive",
+    "body": ["derive(.{ ${1|Hash,Eq,Debug,Json,Ord,Default,Clone|}$0 });"],
+    "description": "Append a derive(...) clause to a struct decl."
+  },
+  "requires": {
+    "prefix": "requires",
+    "body": ["requires(${1:cond})"],
+    "description": "Function pre-condition (runtime checked in safe modes)."
+  },
+  "ensures": {
+    "prefix": "ensures",
+    "body": ["ensures(${1:cond})"],
+    "description": "Function post-condition (runs on every scope exit)."
+  },
+  "effects": {
+    "prefix": "effects",
+    "body": ["effects(${1|.alloc,.noalloc,.io,.noio,.panic|}$0)"],
+    "description": "Effect annotation (sema-linted)."
+  },
+  "extern interface": {
+    "prefix": "externi",
+    "body": [
+      "extern interface ${1:Name} {",
+      "    fn ${2:method}(self, ${3:args}) ${4:void};",
+      "}"
+    ],
+    "description": "C-ABI plugin interface (lowers to extern struct + callconv(.c))."
+  },
+  "own var": {
+    "prefix": "own",
+    "body": ["own var ${1:name} = ${2:expr};"],
+    "description": "Affine binding (subject to use-after-move sema check)."
+  },
+  "main": {
+    "prefix": "main",
+    "body": [
+      "const std = @import(\"std\");",
+      "const zpp = @import(\"zpp\");",
+      "",
+      "pub fn main() !void {",
+      "    $0",
+      "}"
+    ],
+    "description": "Standard Zig++ entry point."
+  }
+}
