@@ -4,6 +4,13 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.12](https://github.com/nktkt/zigpp-lang/compare/v0.1.11...v0.1.12) (2026-04-29)
+
+
+### Features
+
+* multi-file e2e — examples/multi_file/ + zig build multi-e2e ([ac258e4](https://github.com/nktkt/zigpp-lang/commit/ac258e4335c24af99e250b50a112c82046251d37))
+
 ## [0.1.11](https://github.com/nktkt/zigpp-lang/compare/v0.1.10...v0.1.11) (2026-04-29)
 
 
