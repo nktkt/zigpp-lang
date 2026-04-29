@@ -70,6 +70,11 @@
         "command": "zigpp.lower",
         "title": "Zig++: Show Lowered Zig",
         "category": "Zig++"
+      },
+      {
+        "command": "zigpp.explain",
+        "title": "Zig++: Explain Diagnostic Code",
+        "category": "Zig++"
       }
     ],
     "keybindings": [
@@ -83,6 +88,12 @@
         "command": "zigpp.lower",
         "key": "ctrl+shift+l",
         "mac": "cmd+shift+l",
+        "when": "editorTextFocus && editorLangId == zigpp"
+      },
+      {
+        "command": "zigpp.explain",
+        "key": "ctrl+shift+e",
+        "mac": "cmd+shift+e",
         "when": "editorTextFocus && editorLangId == zigpp"
       }
     ]

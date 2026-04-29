@@ -215,6 +215,42 @@ jobs:
           path: tests/fuzz/crashes/
           if-no-files-found: ignore
 
+  perf:
+    name: bench (lowering throughput)
+    runs-on: ubuntu-latest
+    # Bench is informational. Keep it out of the required-checks set so a
+    # noisy run does not block PRs; surface the numbers in the job summary.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install Zig
+        run: |
+          set -euo pipefail
+          ZIG_NAME="zig-x86_64-linux-${ZIG_VERSION}"
+          ZIG_ARCHIVE="${ZIG_NAME}.tar.xz"
+          ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/${ZIG_ARCHIVE}"
+          curl -fsSL "$ZIG_URL" -o "$ZIG_ARCHIVE"
+          tar -xJf "$ZIG_ARCHIVE"
+          echo "$(pwd)/${ZIG_NAME}" >> "$GITHUB_PATH"
+
+      - name: Run bench
+        run: |
+          set -euo pipefail
+          zig build bench | tee bench-output.md
+          {
+            echo "## Lowering throughput"
+            echo
+            cat bench-output.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload bench output
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: bench-${{ github.sha }}
+          path: bench-output.md
+          retention-days: 30
+
   vscode-extension:
     name: vscode extension (tsc compile)
     runs-on: ubuntu-latest

@@ -76,13 +76,13 @@ async function startLanguageClient(context: vscode.ExtensionContext): Promise<vo
 }
 
 function runZppCommand(
-  subcommand: 'run' | 'lower',
-  filePath: string,
+  subcommand: 'run' | 'lower' | 'explain',
+  arg: string,
   onStdout: (chunk: string) => void,
   onStderr: (chunk: string) => void,
   onExit: (code: number | null) => void
 ): void {
-  const proc = cp.spawn('zpp', [subcommand, filePath], {
+  const proc = cp.spawn('zpp', [subcommand, arg], {
     cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
   });
 
@@ -177,7 +177,61 @@ function registerCommands(context: vscode.ExtensionContext): void {
     );
   });
 
-  context.subscriptions.push(runCommand, lowerCommand);
+  const explainCommand = vscode.commands.registerCommand(
+    'zigpp.explain',
+    async () => {
+      // Try to pre-fill from a diagnostic at the active cursor position.
+      let initial: string | undefined;
+      const editor = vscode.window.activeTextEditor;
+      if (editor) {
+        const diags = vscode.languages.getDiagnostics(editor.document.uri);
+        const pos = editor.selection.active;
+        for (const d of diags) {
+          if (!d.range.contains(pos)) continue;
+          const code =
+            typeof d.code === 'string'
+              ? d.code
+              : typeof d.code === 'object' && d.code !== null
+                ? String((d.code as { value: unknown }).value)
+                : undefined;
+          if (code) {
+            initial = code;
+            break;
+          }
+        }
+      }
+
+      const arg = await vscode.window.showInputBox({
+        prompt: 'Diagnostic code (e.g. Z0010)',
+        value: initial,
+        validateInput: (v) =>
+          /^[Zz]\d{4}$/.test(v.trim())
+            ? null
+            : 'Expected a Z#### code (e.g. Z0010)',
+      });
+      if (!arg) return;
+
+      const channel = getOutputChannel();
+      channel.show(true);
+      channel.appendLine(`> zpp explain ${arg}`);
+
+      runZppCommand(
+        'explain',
+        arg.trim(),
+        (chunk) => channel.append(chunk),
+        (chunk) => channel.append(chunk),
+        (code) => {
+          if (code !== 0 && code !== null) {
+            channel.appendLine(
+              `\n[zpp explain exited with code ${code}]`
+            );
+          }
+        }
+      );
+    }
+  );
+
+  context.subscriptions.push(runCommand, lowerCommand, explainCommand);
 }
 
 export async function activate(
