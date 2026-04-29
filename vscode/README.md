@@ -29,6 +29,9 @@ official Zig extension.
   document (functions, traits, structs, owned structs, extern interfaces,
   impl targets). Trigger characters are `.` and `:`. Context-aware
   completion (after `.`, after `impl`, etc.) is not implemented yet.
+- **Go to definition** (`textDocument/definition`): jump from a use of a
+  top-level identifier to its declaration in the same file. Cross-file
+  resolution and method-on-receiver resolution are not implemented yet.
 - "Run current file" command that shells out to `zpp run` and streams output
   to the Zig++ output channel.
 - "Show lowered Zig" command that opens the result of `zpp lower` in a new
@@ -105,10 +108,11 @@ code --install-extension zigpp-0.1.0.vsix
 
 - The LSP is intentionally MVP. It currently surfaces diagnostics from the
   `zpp` parser/sema and supports `textDocument/formatting`,
-  `textDocument/hover`, `textDocument/documentSymbol` (Outline view), and a
-  context-free `textDocument/completion` (keywords + top-level decl names).
-  Workspace symbol search, go-to-definition, context-aware completion, and
-  rename are not implemented yet.
+  `textDocument/hover`, `textDocument/documentSymbol` (Outline view), a
+  context-free `textDocument/completion` (keywords + top-level decl names),
+  and same-file `textDocument/definition`. Workspace symbol search,
+  cross-file go-to-definition, context-aware completion, method-on-receiver
+  navigation, and rename are not implemented yet.
 - Semantic highlighting falls back to the TextMate grammar — there's no
   semantic-tokens server response yet.
 - The grammar uses a heuristic (PascalCase identifier) for type names. In

@@ -181,6 +181,16 @@ fn lookupKeyword(s: []const u8) ?TokenKind {
     return null;
 }
 
+/// Public identifier-byte predicates so tools (LSP, formatters) can locate
+/// identifiers in source text without re-tokenizing the whole file.
+pub fn identStart(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_';
+}
+
+pub fn identCont(c: u8) bool {
+    return identStart(c) or (c >= '0' and c <= '9');
+}
+
 pub const Lexer = struct {
     source: []const u8,
     pos: u32 = 0,
@@ -226,11 +236,11 @@ pub const Lexer = struct {
     }
 
     fn isIdentStart(c: u8) bool {
-        return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_';
+        return identStart(c);
     }
 
     fn isIdentCont(c: u8) bool {
-        return isIdentStart(c) or (c >= '0' and c <= '9');
+        return identCont(c);
     }
 
     fn isDigit(c: u8) bool {

@@ -180,7 +180,7 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
 
     if (std.mem.eql(u8, method, "initialize")) {
         const caps =
-            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"completionProvider":{"triggerCharacters":[".",":"]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false}},"serverInfo":{"name":"zpp-lsp","version":"0.3.0"}}
+            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"completionProvider":{"triggerCharacters":[".",":"]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false}},"serverInfo":{"name":"zpp-lsp","version":"0.4.0"}}
         ;
         try writeResult(server.allocator, id_text, caps);
         return;
@@ -224,6 +224,10 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
     }
     if (std.mem.eql(u8, method, "textDocument/completion")) {
         try onCompletion(server, id_text, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/definition")) {
+        try onDefinition(server, id_text, params);
         return;
     }
     if (obj.get("id") != null) {
@@ -764,6 +768,119 @@ fn appendCompletionItem(
     try out.appendSlice(allocator, buf);
 }
 
+/// Convert an LSP (line, character) position to a byte offset in `source`.
+/// Both inputs are 0-indexed per LSP spec. Returns null when the position
+/// is past EOF; clamps `character` to end-of-line.
+fn posToOffset(source: []const u8, line: usize, character: usize) ?u32 {
+    var off: u32 = 0;
+    var cur_line: usize = 0;
+    while (cur_line < line) {
+        if (off >= source.len) return null;
+        if (source[off] == '\n') cur_line += 1;
+        off += 1;
+    }
+    var col: usize = 0;
+    while (col < character) : (col += 1) {
+        if (off >= source.len) return off;
+        if (source[off] == '\n') return off;
+        off += 1;
+    }
+    return off;
+}
+
+/// Return the identifier slice of `source` straddling byte offset `off`,
+/// or null if `off` isn't on an identifier byte. Walks backward to the
+/// first ident-start byte and forward through ident-cont bytes.
+fn identAt(source: []const u8, off: u32) ?[]const u8 {
+    if (off >= source.len) return null;
+    if (!compiler.token.identCont(source[off])) return null;
+    var start: u32 = off;
+    while (start > 0 and compiler.token.identCont(source[start - 1])) start -= 1;
+    if (!compiler.token.identStart(source[start])) return null;
+    var end: u32 = off + 1;
+    while (end < source.len and compiler.token.identCont(source[end])) end += 1;
+    return source[start..end];
+}
+
+fn onDefinition(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    const p = params orelse return writeResult(server.allocator, id_text, "null");
+    if (p != .object) return writeResult(server.allocator, id_text, "null");
+    const td = p.object.get("textDocument") orelse return writeResult(server.allocator, id_text, "null");
+    if (td != .object) return writeResult(server.allocator, id_text, "null");
+    const uri_v = td.object.get("uri") orelse return writeResult(server.allocator, id_text, "null");
+    if (uri_v != .string) return writeResult(server.allocator, id_text, "null");
+    const pos_v = p.object.get("position") orelse return writeResult(server.allocator, id_text, "null");
+    if (pos_v != .object) return writeResult(server.allocator, id_text, "null");
+    const line_v = pos_v.object.get("line") orelse return writeResult(server.allocator, id_text, "null");
+    const char_v = pos_v.object.get("character") orelse return writeResult(server.allocator, id_text, "null");
+    if (line_v != .integer or char_v != .integer) return writeResult(server.allocator, id_text, "null");
+    if (line_v.integer < 0 or char_v.integer < 0) return writeResult(server.allocator, id_text, "null");
+
+    const text = server.docs.get(uri_v.string) orelse {
+        try writeResult(server.allocator, id_text, "null");
+        return;
+    };
+    const allocator = server.allocator;
+    const result = try buildDefinition(
+        allocator,
+        text,
+        uri_v.string,
+        @intCast(line_v.integer),
+        @intCast(char_v.integer),
+    );
+    defer allocator.free(result);
+    try writeResult(server.allocator, id_text, result);
+}
+
+/// Build the JSON `result` payload (a Location object or "null") for a
+/// same-file definition lookup. Returns "null" when:
+///   - the position is not on an identifier
+///   - the identifier doesn't match any top-level decl name
+///   - the document fails to parse
+fn buildDefinition(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    uri: []const u8,
+    line: usize,
+    character: usize,
+) ![]u8 {
+    const off = posToOffset(source, line, character) orelse return allocator.dupe(u8, "null");
+    const ident = identAt(source, off) orelse return allocator.dupe(u8, "null");
+
+    var diags = compiler.Diagnostics.init(allocator);
+    defer diags.deinit();
+    var arena = compiler.ast.Arena.init(allocator);
+    defer arena.deinit();
+    const file = compiler.parseSource(allocator, source, &arena, &diags) catch {
+        return allocator.dupe(u8, "null");
+    };
+
+    for (file.decls) |decl| {
+        const name: ?[]const u8 = switch (decl) {
+            .fn_decl => |fd| fd.sig.name,
+            .trait => |t| t.name,
+            .owned_struct => |os| os.name,
+            .struct_decl => |sd| sd.name,
+            .extern_interface => |ei| ei.name,
+            .impl_block, .raw => null,
+        };
+        if (name == null) continue;
+        if (!std.mem.eql(u8, name.?, ident)) continue;
+
+        var out = std.ArrayList(u8){};
+        defer out.deinit(allocator);
+        const uri_json = try jsonStringify(allocator, uri);
+        defer allocator.free(uri_json);
+        try out.appendSlice(allocator, "{\"uri\":");
+        try out.appendSlice(allocator, uri_json);
+        try out.appendSlice(allocator, ",\"range\":");
+        try appendRangeJson(&out, allocator, rangeFromSpan(source, decl.span()));
+        try out.append(allocator, '}');
+        return out.toOwnedSlice(allocator);
+    }
+    return allocator.dupe(u8, "null");
+}
+
 fn countLines(s: []const u8) usize {
     var n: usize = 0;
     for (s) |c| if (c == '\n') {
@@ -929,4 +1046,39 @@ test "buildCompletionResult dedupes label collisions between idents and keywords
     try std.testing.expectEqual(@as(usize, 1), count);
     // The user's fn_helper still shows up.
     try std.testing.expect(std.mem.indexOf(u8, out, "\"label\":\"fn_helper\",\"kind\":3") != null);
+}
+
+test "buildDefinition resolves a same-file fn name" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn helper(x: usize) usize { return x + 1; }
+        \\pub fn main() void {
+        \\    _ = helper(2);
+        \\}
+    ;
+    // Position lands on `helper` at line 2 (0-indexed), character 9.
+    const out = try buildDefinition(a, src, "file:///x.zpp", 2, 9);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"uri\":\"file:///x.zpp\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"range\":") != null);
+    // Range must point back to line 0 where `fn helper` is declared.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"start\":{\"line\":0") != null);
+}
+
+test "buildDefinition returns null when ident matches no decl" {
+    const a = std.testing.allocator;
+    const src = "fn helper() void { _ = unknown_name; }\n";
+    // Position lands inside `unknown_name`.
+    const out = try buildDefinition(a, src, "file:///x.zpp", 0, 25);
+    defer a.free(out);
+    try std.testing.expectEqualStrings("null", out);
+}
+
+test "buildDefinition returns null when off identifier" {
+    const a = std.testing.allocator;
+    const src = "fn helper() void {}\n";
+    // Position is on the space between `fn` and `helper`.
+    const out = try buildDefinition(a, src, "file:///x.zpp", 0, 2);
+    defer a.free(out);
+    try std.testing.expectEqualStrings("null", out);
 }
