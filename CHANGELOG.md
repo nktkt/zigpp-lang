@@ -4,6 +4,13 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.30](https://github.com/nktkt/zigpp-lang/compare/v0.1.29...v0.1.30) (2026-04-29)
+
+
+### Features
+
+* **sema:** borrow check round 2 — multi-borrow + block-scope tracking ([82a6137](https://github.com/nktkt/zigpp-lang/commit/82a613775e539a026138120062c60ff78002401e))
+
 ## [0.1.29](https://github.com/nktkt/zigpp-lang/compare/v0.1.28...v0.1.29) (2026-04-29)
 
 
