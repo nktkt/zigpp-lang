@@ -1,0 +1,4 @@
+[main] static dispatch via the injected method
+[main] dynamic dispatch over the imported vtable instances
+>> audit | dynamic dispatch over the imported vtable instances (end)
+(cross-file pub trait + dyn dispatch)
