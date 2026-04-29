@@ -40,6 +40,7 @@ pub const Code = enum {
     z0010_missing_deinit_on_owned,
     z0011_using_type_lacks_deinit,
     z0020_use_after_move,
+    z0021_borrow_invalidated_by_move,
     z0030_effect_violation,
     z0040_impl_missing_method,
     z0100_unexpected_token,
@@ -56,6 +57,7 @@ pub const Code = enum {
             .z0010_missing_deinit_on_owned => "Z0010",
             .z0011_using_type_lacks_deinit => "Z0011",
             .z0020_use_after_move => "Z0020",
+            .z0021_borrow_invalidated_by_move => "Z0021",
             .z0030_effect_violation => "Z0030",
             .z0040_impl_missing_method => "Z0040",
             .z0100_unexpected_token => "Z0100",
@@ -78,6 +80,7 @@ pub fn hint(code: Code) ?[]const u8 {
         .z0010_missing_deinit_on_owned => "owned structs must release their resources explicitly. Add:\n  pub fn deinit(self: *@This()) void {\n      // free anything held by `self`, then leave it in a moved-from state.\n  }",
         .z0011_using_type_lacks_deinit => "give the type a `deinit` method, or drop the `using` binding so the compiler does not try to auto-release it.",
         .z0020_use_after_move => "the value was consumed by `move`. Rebind it (`own var x = ...`) or restructure the code to keep a single owner.",
+        .z0021_borrow_invalidated_by_move => "the value still has an outstanding borrow (from `&x` or `&x.field`). End the borrow's scope before moving, or restructure to avoid the conflict.",
         .z0030_effect_violation => "the function declared an effect it then violated. Remove the `effects(...)` annotation or eliminate the disallowed operation (allocation, IO, etc.).",
         .z0040_impl_missing_method => "every method declared on the trait must be implemented. Add the listed missing methods, or drop the impl block if you do not intend to satisfy the trait.",
         .z0100_unexpected_token => "remove or replace the highlighted token. The parser was in the middle of a declaration or expression and could not continue.",
@@ -164,6 +167,31 @@ pub fn explain(code: Code) []const u8 {
         \\    use(b);
         \\
         \\Or restructure so each owner is read exactly once.
+        ,
+        .z0021_borrow_invalidated_by_move =>
+        \\Z0021: borrow invalidated by move
+        \\
+        \\A function-local borrow was taken (`&x` or `&x.field`) and then the
+        \\borrowed binding was consumed by `move x` while the borrow was
+        \\still in scope. After the move, the reference would dangle, so
+        \\sema rejects the move.
+        \\
+        \\Triggers:
+        \\    own var person = Person{ .name = "Ada" };
+        \\    const r = &person.name;
+        \\    const p = move person;     // r is still alive — invalid
+        \\    _ = r;
+        \\    _ = p;
+        \\
+        \\Fix (let the borrow end first):
+        \\    own var person = Person{ .name = "Ada" };
+        \\    {
+        \\        const r = &person.name;
+        \\        use(r);
+        \\    }
+        \\    const p = move person;     // OK, no live borrow
+        \\
+        \\Or restructure so the move and the borrow don't overlap.
         ,
         .z0030_effect_violation =>
         \\Z0030: function violates declared effect
