@@ -4,6 +4,13 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.29](https://github.com/nktkt/zigpp-lang/compare/v0.1.28...v0.1.29) (2026-04-29)
+
+
+### Features
+
+* **lsp:** semanticTokens/full (replaces TextMate fallback) ([6eae63e](https://github.com/nktkt/zigpp-lang/commit/6eae63e60bc5150a13175fd2fe88926a7fed6763))
+
 ## [0.1.28](https://github.com/nktkt/zigpp-lang/compare/v0.1.27...v0.1.28) (2026-04-29)
 
 
