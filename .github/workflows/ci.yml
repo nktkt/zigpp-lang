@@ -110,9 +110,10 @@ jobs:
         run: |
           set -euo pipefail
           cd examples-consumer
-          zig build run | tee /tmp/consumer-output.txt
-          grep -q "hello from a downstream Zig++ consumer" /tmp/consumer-output.txt
-          grep -q "event hash = " /tmp/consumer-output.txt
+          out=$(zig build run 2>&1)
+          echo "$out"
+          grep -qF 'hello from a downstream Zig++ consumer' <<< "$out"
+          grep -qF 'event hash = ' <<< "$out"
 
       - name: examples-consumer builds and runs (windows)
         if: runner.os == 'Windows'
