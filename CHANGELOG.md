@@ -4,6 +4,18 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.19](https://github.com/nktkt/zigpp-lang/compare/v0.1.18...v0.1.19) (2026-04-29)
+
+
+### Features
+
+* **lexer:** support `\\`-prefixed multi-line strings ([27e8daa](https://github.com/nktkt/zigpp-lang/commit/27e8daaaea31f1fe565db779961443879a652c93))
+* **lexer:** support `\\`-prefixed multi-line strings ([b2d06d4](https://github.com/nktkt/zigpp-lang/commit/b2d06d4bbfc16a6d3ffd0f6022ba1192b84da7da))
+* **sema:** Z0021 borrow invalidated by move (MVP) ([da8b3f4](https://github.com/nktkt/zigpp-lang/commit/da8b3f42d577b612542789f7418c67540c4978e7))
+* **sema:** Z0021 borrow invalidated by move (MVP) ([769f6f2](https://github.com/nktkt/zigpp-lang/commit/769f6f2800946f149d2c734bc56b8ff1f5db3e54))
+* **vscode:** status bar + openDocs + more snippets ([3eaadfc](https://github.com/nktkt/zigpp-lang/commit/3eaadfca84b242546ceb6f07fe67286c5b5c1552))
+* **vscode:** status bar version + openDocs command + 5 more snippets ([11e2d8e](https://github.com/nktkt/zigpp-lang/commit/11e2d8e7f72c82905f48fa4c5c5f63284cf440c3))
+
 ## [0.1.18](https://github.com/nktkt/zigpp-lang/compare/v0.1.17...v0.1.18) (2026-04-29)
 
 
