@@ -4,6 +4,13 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.23](https://github.com/nktkt/zigpp-lang/compare/v0.1.22...v0.1.23) (2026-04-29)
+
+
+### Features
+
+* **sema:** Z0030 .panic effect inference (round 3) ([c5f0c3f](https://github.com/nktkt/zigpp-lang/commit/c5f0c3f38b57958347e9cd71e917853650c07ebd))
+
 ## [0.1.22](https://github.com/nktkt/zigpp-lang/compare/v0.1.21...v0.1.22) (2026-04-29)
 
 
