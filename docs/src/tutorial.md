@@ -299,6 +299,19 @@ visible `g.vtable.greet` field. Notice that the `dyn` type
 appears in the slice literal (`[_]dyn Greeter{ ... }`) — there's
 no implicit virtual dispatch happening anywhere.
 
+## Bonus — explaining a diagnostic code
+
+When the compiler prints a code like `Z0020`, you can ask the CLI for
+a long-form explanation:
+
+```sh
+zpp explain Z0020
+```
+
+You get a 1-paragraph summary, an example that triggers the code,
+and an example of the fix. Lower-case (`zpp explain z0020`) works
+too.
+
 ## Where to go next
 
 - **[Examples](./examples.md)** — 9 small programs covering every

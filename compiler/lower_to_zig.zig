@@ -91,7 +91,7 @@ pub const Lowerer = struct {
 
     fn lowerDecl(self: *Lowerer, d: ast.TopDecl) !void {
         switch (d) {
-            .raw => |r| try self.write(r.text),
+            .raw => |r| try self.writeRewrittenCode(r.text),
             .trait => |t| try self.lowerTrait(t),
             .impl_block => |i| try self.lowerImpl(i),
             .owned_struct => |o| try self.lowerOwnedStruct(o),
@@ -446,6 +446,29 @@ pub const Lowerer = struct {
         var i: usize = 0;
         while (i < text.len) {
             const c = text[i];
+            // `@import("...zpp")` -> `@import("...zig")` so .zpp files can
+            // reference each other directly. Done before the string-literal
+            // pass-through so we can edit the path inside the quotes.
+            if (c == '@' and substrAt(text, i, "@import(\"")) {
+                const start = i;
+                i += "@import(\"".len;
+                const path_start = i;
+                while (i < text.len and text[i] != '"') : (i += 1) {}
+                const path_end = i;
+                if (i < text.len and i + 1 < text.len and text[i + 1] == ')') {
+                    const path = text[path_start..path_end];
+                    if (std.mem.endsWith(u8, path, ".zpp")) {
+                        try self.write("@import(\"");
+                        try self.write(path[0 .. path.len - 4]);
+                        try self.write(".zig\")");
+                        i += 2; // consume `")`
+                        continue;
+                    }
+                }
+                // Not a .zpp import — write what we already consumed verbatim.
+                try self.write(text[start..i]);
+                continue;
+            }
             // Pass-through string literals.
             if (c == '"') {
                 const start = i;
@@ -551,6 +574,12 @@ fn normalizeType(t: []const u8) []const u8 {
 /// True iff `text[i..]` starts with `kw` and the next char (if any) is not an
 /// identifier continuation. Used by `writeRewrittenType` to recognize the
 /// `dyn` and `own` keywords without matching e.g. `dynamic`.
+/// True iff `text[at..]` starts with `needle`.
+fn substrAt(text: []const u8, at: usize, needle: []const u8) bool {
+    if (at + needle.len > text.len) return false;
+    return std.mem.eql(u8, text[at .. at + needle.len], needle);
+}
+
 fn matchKeywordAt(text: []const u8, i: usize, kw: []const u8) bool {
     if (i + kw.len > text.len) return false;
     if (!std.mem.eql(u8, text[i .. i + kw.len], kw)) return false;

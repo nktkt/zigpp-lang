@@ -24,6 +24,7 @@ const Subcommand = enum {
     migrate,
     lsp,
     init,
+    explain,
     version,
     help,
 
@@ -38,6 +39,7 @@ const Subcommand = enum {
             .{ "migrate", .migrate },
             .{ "lsp", .lsp },
             .{ "init", .init },
+            .{ "explain", .explain },
             .{ "version", .version },
             .{ "--version", .version },
             .{ "-V", .version },
@@ -120,6 +122,7 @@ pub fn run(allocator: std.mem.Allocator, argv: [][:0]u8) !ExitCode {
         .migrate => cmdMigrate(allocator, rest),
         .lsp => cmdLsp(allocator, rest),
         .init => cmdInit(allocator, rest),
+        .explain => cmdExplain(rest),
         .version => cmdVersion(),
         .help => cmdHelp(rest),
     };
@@ -142,6 +145,7 @@ fn printUsage() void {
         \\    migrate <file.zig>   suggest .zpp rewrites for a .zig file
         \\    lsp                  start LSP server on stdin/stdout
         \\    init <name>          scaffold a new Zig++ project under <name>/
+        \\    explain <Z####>      explain a diagnostic code in detail
         \\    version              print version
         \\    help [subcommand]    show this help (or details for a subcommand)
         \\
@@ -173,6 +177,7 @@ fn cmdHelp(args: [][:0]u8) !ExitCode {
         .migrate => "zpp migrate <file.zig>\n  Diff suggestions to convert defer/init/deinit patterns to Zig++.\n",
         .lsp => "zpp lsp\n  Speak LSP over stdio. Run from your editor; not for human use.\n",
         .init => "zpp init <name>\n  Scaffold a new Zig++ project under <name>/ with build.zig, build.zig.zon, src/main.zpp, and a starter README. Refuses to overwrite an existing directory.\n",
+        .explain => "zpp explain <Z####>\n  Print a long-form explanation of a diagnostic code, including a triggering example and a fix.\n",
         .version => "zpp version\n  Print compiler version.\n",
         .help => "zpp help [subcommand]\n  Show this message.\n",
     };
@@ -446,6 +451,30 @@ fn cmdLsp(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
     return lsp.runServer(allocator);
 }
 
+fn cmdExplain(args: [][:0]u8) !ExitCode {
+    if (args.len != 1) {
+        ePrint("zpp explain: expected exactly one diagnostic code (e.g. Z0010)\n", .{});
+        return .usage_error;
+    }
+    const arg = args[0];
+    // Accept lower- or upper-case input; normalize to upper for lookup.
+    var upper_buf: [16]u8 = undefined;
+    if (arg.len > upper_buf.len) {
+        ePrint("zpp explain: '{s}' is not a recognized code\n", .{arg});
+        return .user_error;
+    }
+    for (arg, 0..) |c, i| upper_buf[i] = std.ascii.toUpper(c);
+    const upper = upper_buf[0..arg.len];
+
+    const code = compiler.diagnostics.codeFromId(upper) orelse {
+        ePrint("zpp explain: unknown diagnostic code '{s}'\n", .{arg});
+        ePrint("       run `zpp help` and check sema or parser docs.\n", .{});
+        return .user_error;
+    };
+    oPrint("{s}\n", .{compiler.diagnostics.explain(code)});
+    return .ok;
+}
+
 const tpl_main_zpp = @embedFile("templates/main.zpp");
 const tpl_build_zig = @embedFile("templates/build.zig");
 const tpl_build_zon = @embedFile("templates/build.zig.zon");
@@ -610,4 +639,20 @@ test "renderTemplate substitutes both placeholders" {
     const out = try renderTemplate(a, tpl, "demo", "deadbeef");
     defer a.free(out);
     try std.testing.expectEqualStrings("name=demo, fp=0xdeadbeef;", out);
+}
+
+test "Subcommand.parse covers init and explain" {
+    try std.testing.expectEqual(Subcommand.init, Subcommand.parse("init").?);
+    try std.testing.expectEqual(Subcommand.explain, Subcommand.parse("explain").?);
+}
+
+test "explain finds every code by id" {
+    inline for (@typeInfo(compiler.diagnostics.Code).@"enum".fields) |f| {
+        const c: compiler.diagnostics.Code = @enumFromInt(f.value);
+        const id_str = c.id();
+        const looked_up = compiler.diagnostics.codeFromId(id_str) orelse @panic("codeFromId returned null");
+        try std.testing.expectEqual(c, looked_up);
+        // Every code has a non-empty explanation.
+        try std.testing.expect(compiler.diagnostics.explain(c).len > 50);
+    }
 }

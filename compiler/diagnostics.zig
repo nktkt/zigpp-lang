@@ -87,6 +87,196 @@ pub fn hint(code: Code) ?[]const u8 {
     };
 }
 
+/// Long-form explanation shown by `zpp explain <code>`. Each entry is a
+/// self-contained markdown-ish block: a one-paragraph summary, a "triggers"
+/// example, and a "fix" example.
+pub fn explain(code: Code) []const u8 {
+    return switch (code) {
+        .z0001_unknown_trait =>
+        \\Z0001: unknown trait
+        \\
+        \\You referenced a trait by name (`impl T for ...` or `dyn T`) but no
+        \\`trait T` declaration is in scope. The trait must be declared before
+        \\it is used.
+        \\
+        \\Triggers:
+        \\    fn dispatch(g: dyn Greeter) void { g.greet(); }   // Greeter undefined
+        \\
+        \\Fix:
+        \\    trait Greeter { fn greet(self) void; }
+        \\    fn dispatch(g: dyn Greeter) void { g.vtable.greet(g.ptr); }
+        ,
+        .z0010_missing_deinit_on_owned =>
+        \\Z0010: owned struct missing deinit
+        \\
+        \\`owned struct` is a sema-checked promise that the type owns
+        \\resources that must be released. Every `owned struct` therefore
+        \\requires a `pub fn deinit(self: *@This()) void` method.
+        \\
+        \\Triggers:
+        \\    owned struct Buffer { data: []u8 }   // no deinit
+        \\
+        \\Fix:
+        \\    owned struct Buffer {
+        \\        data: []u8,
+        \\        allocator: std.mem.Allocator,
+        \\        pub fn deinit(self: *Buffer) void {
+        \\            self.allocator.free(self.data);
+        \\        }
+        \\    }
+        \\
+        \\Or: drop the `owned` modifier if the type really does not own
+        \\anything that needs releasing.
+        ,
+        .z0011_using_type_lacks_deinit =>
+        \\Z0011: `using` target has no deinit
+        \\
+        \\`using x = expr;` lowers to `var x = expr; defer x.deinit();`. The
+        \\type of `expr` must therefore have a `deinit` method, otherwise the
+        \\generated `defer` would not type-check.
+        \\
+        \\Triggers:
+        \\    using s = "literal";   // []const u8 has no deinit
+        \\
+        \\Fix:
+        \\    var s: []const u8 = "literal";   // plain var, no auto-cleanup
+        \\
+        \\Or: give the source type a `deinit` method.
+        ,
+        .z0020_use_after_move =>
+        \\Z0020: use after move
+        \\
+        \\A binding declared with `own var` was consumed by `move x` and then
+        \\read again in the same scope. After `move`, the original name no
+        \\longer holds a valid value.
+        \\
+        \\Triggers:
+        \\    own var a = try Buffer.init(alloc);
+        \\    const b = move a;
+        \\    use(a);                 // a is moved — invalid
+        \\
+        \\Fix (rebind the moved value):
+        \\    own var a = try Buffer.init(alloc);
+        \\    const b = move a;
+        \\    use(b);
+        \\
+        \\Or restructure so each owner is read exactly once.
+        ,
+        .z0030_effect_violation =>
+        \\Z0030: function violates declared effect
+        \\
+        \\You annotated a function with `effects(.noalloc)` (or another
+        \\restrictive effect) and then called something that violates it.
+        \\Effect annotations are checked by sema as a heuristic — identifiers
+        \\containing `Allocator`, `alloc`, `create`, etc. count as an
+        \\allocation site.
+        \\
+        \\Triggers:
+        \\    effects(.noalloc) fn pure(a: Allocator) !void {
+        \\        const xs = try a.alloc(u8, 16);   // violates .noalloc
+        \\        _ = xs;
+        \\    }
+        \\
+        \\Fix: drop the `effects(.noalloc)` annotation, or eliminate the
+        \\allocation (use a fixed buffer / arena owned by the caller).
+        ,
+        .z0100_unexpected_token =>
+        \\Z0100: unexpected token
+        \\
+        \\The parser was in the middle of a declaration or expression and the
+        \\next token did not fit any of the expected continuations.
+        \\
+        \\Triggers:
+        \\    fn foo() void { 5 + ; }     // operator with no rhs
+        \\
+        \\Fix: remove or correct the highlighted token.
+        ,
+        .z0101_expected_identifier =>
+        \\Z0101: expected identifier
+        \\
+        \\A name was required here. Function names, struct names, trait
+        \\names, parameter names all use this same diagnostic.
+        \\
+        \\Triggers:
+        \\    fn () void {}               // missing fn name
+        \\    struct { x: i32 }           // missing struct name (in places that need one)
+        \\
+        \\Fix: supply a name. Identifiers match `[A-Za-z_][A-Za-z0-9_]*`.
+        ,
+        .z0102_expected_token =>
+        \\Z0102: expected a specific token
+        \\
+        \\The parser needed a particular punctuation (`;`, `,`, `)`, `}`,
+        \\`=`, `:`, etc.) but found something else.
+        \\
+        \\Triggers:
+        \\    fn foo() void { var x = 1 }   // missing `;` after `1`
+        \\
+        \\Fix: insert the expected token. The diagnostic message tells you
+        \\which one was needed.
+        ,
+        .z0103_unterminated_block =>
+        \\Z0103: unterminated block
+        \\
+        \\A `{` was opened but the file ended before the matching `}`.
+        \\
+        \\Triggers:
+        \\    fn foo() void {
+        \\        var x = 1;
+        \\    // (no closing brace)
+        \\
+        \\Fix: add the matching `}`. Check earlier braces in this scope for
+        \\an extra opener as well.
+        ,
+        .z0200_invalid_char =>
+        \\Z0200: invalid character in source
+        \\
+        \\The lexer found a byte outside the printable ASCII / whitespace set
+        \\and outside any string literal. `.zpp` source must be valid UTF-8;
+        \\stray binary bytes are rejected.
+        \\
+        \\Triggers: typically a stray BOM, a control character pasted from a
+        \\rich-text editor, or a corrupted file.
+        \\
+        \\Fix: open the file in a hex editor or run `file` on it to see what
+        \\is actually inside; re-save as UTF-8.
+        ,
+        .z0201_unterminated_string =>
+        \\Z0201: unterminated string literal
+        \\
+        \\A `"` was opened but the file ended (or the line ended in a
+        \\non-multiline-string context) before the matching `"`.
+        \\
+        \\Triggers:
+        \\    const s = "hello world ;       // missing closing quote
+        \\
+        \\Fix: add the closing `"`. For multi-line content use the `\\\\` line
+        \\prefix form Zig provides.
+        ,
+        .z0300_lower_internal =>
+        \\Z0300: internal lowering error
+        \\
+        \\This is a compiler bug. The lowering pass tried to emit something
+        \\it could not, and the failure has been reported as a diagnostic
+        \\rather than crashing.
+        \\
+        \\Fix: file an issue at https://github.com/nktkt/zigpp-lang/issues
+        \\with the source that triggered it. The fuzz harness
+        \\(`zig build fuzz`) is also a good way to find more inputs in the
+        \\same shape.
+        ,
+    };
+}
+
+/// Look up a code by its public ID string ("Z0010"). Used by `zpp explain`.
+pub fn codeFromId(id_str: []const u8) ?Code {
+    inline for (@typeInfo(Code).@"enum".fields) |f| {
+        const c: Code = @enumFromInt(f.value);
+        if (std.mem.eql(u8, c.id(), id_str)) return c;
+    }
+    return null;
+}
+
 pub const Diagnostic = struct {
     severity: Severity,
     span: Span,
