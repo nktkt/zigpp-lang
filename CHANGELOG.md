@@ -4,6 +4,16 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.32](https://github.com/nktkt/zigpp-lang/compare/v0.1.31...v0.1.32) (2026-04-29)
+
+
+### Features
+
+* **lsp:** code-action auto-fix (Z0010 deinit stub, Z0040 method stubs) ([fb9fca1](https://github.com/nktkt/zigpp-lang/commit/fb9fca1179ffd408df74324e3e9e2b0cb64f2248))
+* **lsp:** WorkspaceEdit auto-fix for Z0010 + Z0040 ([8138606](https://github.com/nktkt/zigpp-lang/commit/81386062a85b5f22e05d11779c9d3dae02e23aa7))
+* **sema:** [@effects](https://github.com/effects)Of surfaces .custom("name") effects ([7a8ab83](https://github.com/nktkt/zigpp-lang/commit/7a8ab83d5fb26bbb39b5f479974b04bea15865e1))
+* **sema:** [@effects](https://github.com/effects)Of surfaces .custom("name") in lowered output ([37fc1d5](https://github.com/nktkt/zigpp-lang/commit/37fc1d5507eca3f4a32ff7c36ed8aac575045704))
+
 ## [0.1.31](https://github.com/nktkt/zigpp-lang/compare/v0.1.30...v0.1.31) (2026-04-29)
 
 
