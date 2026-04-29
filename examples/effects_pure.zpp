@@ -58,4 +58,17 @@ pub fn main() !void {
     const file_hash = try loadAndHash(allocator, tmp_path);
     std.debug.print("loadAndHash(..)              = {x}\n", .{file_hash});
     std.debug.print("(fnv1a is .noalloc/.noio; loadAndHash is .alloc/.io)\n", .{});
+
+    // ----------------------------------------------------------------
+    // Z0030 — uncomment to see the inference-based check fire:
+    //
+    //     fn lying() void effects(.noalloc) {
+    //         var gpa2 = std.heap.GeneralPurposeAllocator(.{}){};
+    //         _ = gpa2.allocator().alloc(u8, 16) catch return;
+    //     }
+    //
+    // The body calls `.alloc(...)`, so inference deduces the `.alloc`
+    // effect; the `.noalloc` annotation contradicts it, and sema emits
+    //   error: Z0030 fn declared .noalloc but inferred .alloc effect
+    // ----------------------------------------------------------------
 }
