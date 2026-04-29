@@ -45,6 +45,12 @@
         "path": "./syntaxes/zigpp.tmLanguage.json"
       }
     ],
+    "snippets": [
+      {
+        "language": "zigpp",
+        "path": "./snippets/zigpp.json"
+      }
+    ],
     "configuration": {
       "title": "Zig++",
       "properties": {

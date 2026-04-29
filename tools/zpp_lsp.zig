@@ -251,11 +251,14 @@ fn onHover(server: *Server, id_text: []const u8, params: ?std.json.Value) !void 
         if (hd.line != line) continue;
         if (character < hd.col_start or character > hd.col_end) continue;
         const explain_text = compiler.diagnostics.explain(hd.code);
-        // Format as a Markdown hover with the code id as the title.
+        // Format as a Markdown hover: title, explain block, and a docs link
+        // so users can jump to the canonical reference for this code.
+        const code_id_lower = try lowerAscii(server.allocator, hd.code.id());
+        defer server.allocator.free(code_id_lower);
         const md = try std.fmt.allocPrint(
             server.allocator,
-            "**{s}**\n\n```text\n{s}\n```",
-            .{ hd.code.id(), explain_text },
+            "**{s}**\n\n```text\n{s}\n```\n\n[See: docs/diagnostics#{s}](https://nktkt.github.io/zigpp-lang/language.html#{s})",
+            .{ hd.code.id(), explain_text, code_id_lower, code_id_lower },
         );
         defer server.allocator.free(md);
         const escaped = try jsonStringify(server.allocator, md);
@@ -449,6 +452,12 @@ fn countLines(s: []const u8) usize {
 }
 
 /// Allocates a JSON-quoted version of `s`, including surrounding quotes.
+fn lowerAscii(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+    const out = try allocator.alloc(u8, s.len);
+    for (s, 0..) |c, i| out[i] = std.ascii.toLower(c);
+    return out;
+}
+
 fn jsonStringify(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
     var out = std.ArrayList(u8){};
     defer out.deinit(allocator);

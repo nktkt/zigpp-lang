@@ -24,6 +24,17 @@ official Zig extension.
   to the Zig++ output channel.
 - "Show lowered Zig" command that opens the result of `zpp lower` in a new
   untitled `.zig` editor so you can see exactly what the compiler emits.
+- **Snippets** for `trait`, `impl`, `owned struct`, `using`, `dyn`,
+  `derive`, `requires`, `ensures`, `effects`, `extern interface`, `own`,
+  and a `main` boilerplate. Type the prefix and press `Tab`.
+- **Hover with explanations**: hovering over a diagnostic line shows the
+  long-form explanation of the diagnostic code plus a link to the docs
+  site reference.
+- **Quick Fix code actions**: when the cursor is on a Zig++ diagnostic
+  (e.g. Z0010), VS Code's lightbulb offers `Zig++: Explain Z####` to
+  open the long-form text in the output channel.
+- "Explain Diagnostic Code" command (`Cmd/Ctrl+Shift+E`) for direct
+  lookup by code.
 - Bracket matching, auto-closing pairs, and word-pattern tuned for Zig
   identifiers.
 

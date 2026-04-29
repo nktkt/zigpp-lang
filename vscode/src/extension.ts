@@ -179,36 +179,41 @@ function registerCommands(context: vscode.ExtensionContext): void {
 
   const explainCommand = vscode.commands.registerCommand(
     'zigpp.explain',
-    async () => {
-      // Try to pre-fill from a diagnostic at the active cursor position.
-      let initial: string | undefined;
-      const editor = vscode.window.activeTextEditor;
-      if (editor) {
-        const diags = vscode.languages.getDiagnostics(editor.document.uri);
-        const pos = editor.selection.active;
-        for (const d of diags) {
-          if (!d.range.contains(pos)) continue;
-          const code =
-            typeof d.code === 'string'
-              ? d.code
-              : typeof d.code === 'object' && d.code !== null
-                ? String((d.code as { value: unknown }).value)
-                : undefined;
-          if (code) {
-            initial = code;
-            break;
+    async (presupplied?: string) => {
+      // If invoked with a code already (e.g. from the QuickFix code action),
+      // skip the prompt entirely.
+      let arg = presupplied;
+      if (!arg) {
+        // Try to pre-fill from a diagnostic at the active cursor position.
+        let initial: string | undefined;
+        const editor = vscode.window.activeTextEditor;
+        if (editor) {
+          const diags = vscode.languages.getDiagnostics(editor.document.uri);
+          const pos = editor.selection.active;
+          for (const d of diags) {
+            if (!d.range.contains(pos)) continue;
+            const code =
+              typeof d.code === 'string'
+                ? d.code
+                : typeof d.code === 'object' && d.code !== null
+                  ? String((d.code as { value: unknown }).value)
+                  : undefined;
+            if (code) {
+              initial = code;
+              break;
+            }
           }
         }
-      }
 
-      const arg = await vscode.window.showInputBox({
-        prompt: 'Diagnostic code (e.g. Z0010)',
-        value: initial,
-        validateInput: (v) =>
-          /^[Zz]\d{4}$/.test(v.trim())
-            ? null
-            : 'Expected a Z#### code (e.g. Z0010)',
-      });
+        arg = await vscode.window.showInputBox({
+          prompt: 'Diagnostic code (e.g. Z0010)',
+          value: initial,
+          validateInput: (v) =>
+            /^[Zz]\d{4}$/.test(v.trim())
+              ? null
+              : 'Expected a Z#### code (e.g. Z0010)',
+        });
+      }
       if (!arg) return;
 
       const channel = getOutputChannel();
@@ -234,10 +239,58 @@ function registerCommands(context: vscode.ExtensionContext): void {
   context.subscriptions.push(runCommand, lowerCommand, explainCommand);
 }
 
+/**
+ * Code action: when the cursor is on a Zig++ diagnostic with a Z####
+ * code, offer "Zig++: Explain Z####" as a quick-fix that runs the
+ * existing zigpp.explain command.
+ */
+class ExplainCodeActionProvider implements vscode.CodeActionProvider {
+  public static readonly providedKinds = [vscode.CodeActionKind.QuickFix];
+
+  public provideCodeActions(
+    document: vscode.TextDocument,
+    range: vscode.Range | vscode.Selection,
+    context: vscode.CodeActionContext
+  ): vscode.CodeAction[] {
+    const actions: vscode.CodeAction[] = [];
+    for (const d of context.diagnostics) {
+      const code =
+        typeof d.code === 'string'
+          ? d.code
+          : typeof d.code === 'object' && d.code !== null
+            ? String((d.code as { value: unknown }).value)
+            : undefined;
+      if (!code || !/^Z\d{4}$/i.test(code)) continue;
+      const action = new vscode.CodeAction(
+        `Zig++: Explain ${code}`,
+        vscode.CodeActionKind.QuickFix
+      );
+      action.command = {
+        title: `Zig++: Explain ${code}`,
+        command: 'zigpp.explain',
+        arguments: [code],
+      };
+      action.diagnostics = [d];
+      actions.push(action);
+    }
+    // Suppress unused-parameter warning in strict mode.
+    void document;
+    void range;
+    return actions;
+  }
+}
+
 export async function activate(
   context: vscode.ExtensionContext
 ): Promise<void> {
   registerCommands(context);
+  context.subscriptions.push(
+    vscode.languages.registerCodeActionsProvider(
+      { scheme: 'file', language: 'zigpp' },
+      new ExplainCodeActionProvider(),
+      { providedCodeActionKinds: ExplainCodeActionProvider.providedKinds }
+    )
+  );
   await startLanguageClient(context);
 }
 
