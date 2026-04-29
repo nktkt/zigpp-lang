@@ -44,6 +44,57 @@ test "Z0020: use after move" {
     try std.testing.expect(hasCode(&result.diags, "Z0020"));
 }
 
+test "Z0021: move while borrowed (positive)" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn run() void {
+        \\    own var x = Person{ .name = "Ada" };
+        \\    const r = &x.name;
+        \\    const y = move x;
+        \\    _ = r;
+        \\    _ = y;
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(hasCode(&result.diags, "Z0021"));
+}
+
+test "Z0021: same code without borrow does not fire" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn run() void {
+        \\    own var x = Person{ .name = "Ada" };
+        \\    const r = x.name;
+        \\    const y = move x;
+        \\    _ = r;
+        \\    _ = y;
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(!hasCode(&result.diags, "Z0021"));
+}
+
+test "Z0021: borrow and move in different fns do not collide" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn borrowOnly() void {
+        \\    var x = Person{ .name = "Ada" };
+        \\    const r = &x.name;
+        \\    _ = r;
+        \\}
+        \\fn moveOnly() void {
+        \\    own var x = Person{ .name = "Ada" };
+        \\    const y = move x;
+        \\    _ = y;
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(!hasCode(&result.diags, "Z0021"));
+}
+
 test "Z0030: noalloc effect violated by allocator call" {
     const a = std.testing.allocator;
     const src =

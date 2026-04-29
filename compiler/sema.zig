@@ -236,6 +236,12 @@ pub const Sema = struct {
         // are subject to affine checking.
         var own_names = std.StringHashMap(void).init(self.allocator);
         defer own_names.deinit();
+        // Borrow tracking (Z0021). For the MVP we only remember the FIRST
+        // `&x` per fn body (scope-local; the map is reset between fns). When
+        // we later see `move x` while `x` is borrowed we fire Z0021. Multi-
+        // borrow tracking (vector of spans per name) is a follow-up.
+        var borrows = std.StringHashMap(diag.Span).init(self.allocator);
+        defer borrows.deinit();
 
         for (body.stmts) |s| {
             switch (s) {
@@ -243,10 +249,24 @@ pub const Sema = struct {
                     try own_names.put(o.name, {});
                     // re-binding rescinds prior moved status
                     _ = moved.remove(o.name);
+                    // Re-bind also rescinds any outstanding borrow record:
+                    // the new value is a fresh binding.
+                    _ = borrows.remove(o.name);
+                    // The init expression itself may borrow another name.
+                    try self.recordBorrows(o.init_text, o.span, &borrows);
                 },
                 .move_expr_stmt => |m| {
                     if (own_names.contains(m.target)) {
                         try moved.put(m.target, m.span);
+                    }
+                    if (borrows.contains(m.target)) {
+                        try self.diags.emit(
+                            .err,
+                            .z0021_borrow_invalidated_by_move,
+                            m.span,
+                            "cannot move '{s}' while borrowed",
+                            .{m.target},
+                        );
                     }
                 },
                 .using_stmt => |u| {
@@ -259,6 +279,7 @@ pub const Sema = struct {
                             .{ u.name, prev.start },
                         );
                     }
+                    try self.recordBorrows(u.init_text, u.span, &borrows);
                 },
                 .raw => |raw| {
                     // First check uses against the moved set as it stands BEFORE
@@ -278,15 +299,108 @@ pub const Sema = struct {
                     }
                     // Then scan THIS statement's text for `move <ident>` patterns
                     // and record them so the next statement sees them as moved.
+                    // If the moved name has an outstanding borrow recorded
+                    // earlier in this function body, fire Z0021 instead of
+                    // (in addition to) Z0020.
                     var off: usize = 0;
                     while (findMoveTarget(raw.text, off)) |found| {
+                        if (borrows.contains(found.name)) {
+                            try self.diags.emit(
+                                .err,
+                                .z0021_borrow_invalidated_by_move,
+                                raw.span,
+                                "cannot move '{s}' while borrowed",
+                                .{found.name},
+                            );
+                        }
                         if (own_names.contains(found.name)) {
                             try moved.put(found.name, raw.span);
                         }
                         off = found.end;
                     }
+                    // Finally scan the same statement's text for new borrow
+                    // patterns (`&<ident>` / `&<ident>.field`) and record
+                    // the FIRST borrow per name. Order vs the move scan
+                    // above means a single stmt that borrows then moves is
+                    // not flagged — that's an acceptable false-negative
+                    // for the MVP (the heuristic is conservative).
+                    try self.recordBorrows(raw.text, raw.span, &borrows);
                 },
             }
+        }
+    }
+
+    /// Scan `text` for `&<ident>` (optionally followed by `.<field>`) and
+    /// record the FIRST borrow span per identifier into `borrows`. Skips
+    /// strings, char literals and `//` comments the same way `mentionsIdent`
+    /// does so that an `&x` mentioned in a debug message doesn't count as
+    /// a borrow.
+    fn recordBorrows(
+        self: *Sema,
+        text: []const u8,
+        span: diag.Span,
+        borrows: *std.StringHashMap(diag.Span),
+    ) !void {
+        _ = self;
+        var i: usize = 0;
+        while (i < text.len) {
+            const c = text[i];
+            // Skip over double-quoted string literals.
+            if (c == '"') {
+                i += 1;
+                while (i < text.len) : (i += 1) {
+                    if (text[i] == '\\' and i + 1 < text.len) { i += 1; continue; }
+                    if (text[i] == '"') { i += 1; break; }
+                }
+                continue;
+            }
+            // Skip over char literals.
+            if (c == '\'') {
+                i += 1;
+                while (i < text.len and text[i] != '\'') : (i += 1) {
+                    if (text[i] == '\\' and i + 1 < text.len) i += 1;
+                }
+                if (i < text.len) i += 1;
+                continue;
+            }
+            // Skip over `//` line comments.
+            if (c == '/' and i + 1 < text.len and text[i + 1] == '/') {
+                while (i < text.len and text[i] != '\n') i += 1;
+                continue;
+            }
+            if (c == '&') {
+                // Skip `&&` (short-circuit AND in patterns we may add later
+                // — Zig itself uses `and`, but be defensive).
+                if (i + 1 < text.len and text[i + 1] == '&') { i += 2; continue; }
+                // The `&` must be a prefix on an identifier — i.e. NOT
+                // preceded by an identifier char (which would make it a
+                // bitwise-and like `a & b`).
+                if (i > 0 and isIdent(text[i - 1])) { i += 1; continue; }
+                var j = i + 1;
+                // Permit a single leading `*` for `&*ptr` (Zig pointer deref
+                // followed by address-of is uncommon but harmless to skip).
+                while (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
+                const name_start = j;
+                while (j < text.len and isIdent(text[j])) j += 1;
+                if (j > name_start) {
+                    const name = text[name_start..j];
+                    // Don't record borrows of obvious vtable / type names
+                    // (anything starting with an uppercase letter). The
+                    // heuristic is: lower-case-leading identifiers are
+                    // value bindings; capitalised ones are types/vtables.
+                    // This keeps existing examples (`&Handler_impl_for_X`)
+                    // out of the borrow set.
+                    const first = name[0];
+                    const is_value_ident = (first >= 'a' and first <= 'z') or first == '_';
+                    if (is_value_ident) {
+                        const gop = try borrows.getOrPut(name);
+                        if (!gop.found_existing) gop.value_ptr.* = span;
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+            i += 1;
         }
     }
 
