@@ -298,6 +298,30 @@ pub fn codeFromId(id_str: []const u8) ?Code {
     return null;
 }
 
+/// One-line summary for each diagnostic — the first line of `explain(code)`,
+/// stripped of the `Z####: ` prefix. Used by `zpp explain --list`.
+pub fn summary(code: Code) []const u8 {
+    const text = explain(code);
+    const newline = std.mem.indexOfScalar(u8, text, '\n') orelse text.len;
+    const first_line = text[0..newline];
+    // Drop the leading "Z####: " (the id is shown separately by callers).
+    if (std.mem.indexOfScalar(u8, first_line, ':')) |i| {
+        var s = first_line[i + 1 ..];
+        while (s.len > 0 and s[0] == ' ') s = s[1..];
+        return s;
+    }
+    return first_line;
+}
+
+/// Iterator-friendly list of every Code value. Used by `zpp explain --list`.
+pub const all_codes: []const Code = blk: {
+    const fields = @typeInfo(Code).@"enum".fields;
+    var arr: [fields.len]Code = undefined;
+    for (fields, 0..) |f, i| arr[i] = @enumFromInt(f.value);
+    const final = arr;
+    break :blk &final;
+};
+
 pub const Diagnostic = struct {
     severity: Severity,
     span: Span,

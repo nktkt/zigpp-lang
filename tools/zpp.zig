@@ -145,7 +145,7 @@ fn printUsage() void {
         \\    migrate <file.zig>   suggest .zpp rewrites for a .zig file
         \\    lsp                  start LSP server on stdin/stdout
         \\    init <name>          scaffold a new Zig++ project under <name>/
-        \\    explain <Z####>      explain a diagnostic code in detail
+        \\    explain <Z####|-l>   explain a diagnostic code in detail (--list to see all)
         \\    version              print version
         \\    help [subcommand]    show this help (or details for a subcommand)
         \\
@@ -177,7 +177,7 @@ fn cmdHelp(args: [][:0]u8) !ExitCode {
         .migrate => "zpp migrate <file.zig>\n  Diff suggestions to convert defer/init/deinit patterns to Zig++.\n",
         .lsp => "zpp lsp\n  Speak LSP over stdio. Run from your editor; not for human use.\n",
         .init => "zpp init <name>\n  Scaffold a new Zig++ project under <name>/ with build.zig, build.zig.zon, src/main.zpp, and a starter README. Refuses to overwrite an existing directory.\n",
-        .explain => "zpp explain <Z####>\n  Print a long-form explanation of a diagnostic code, including a triggering example and a fix.\n",
+        .explain => "zpp explain <Z####|--list>\n  Print a long-form explanation of a diagnostic code, or `--list` to see every code with a one-line summary.\n",
         .version => "zpp version\n  Print compiler version.\n",
         .help => "zpp help [subcommand]\n  Show this message.\n",
     };
@@ -629,10 +629,13 @@ fn cmdLsp(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
 
 fn cmdExplain(args: [][:0]u8) !ExitCode {
     if (args.len != 1) {
-        ePrint("zpp explain: expected exactly one diagnostic code (e.g. Z0010)\n", .{});
+        ePrint("zpp explain: expected exactly one argument (Z#### code or --list)\n", .{});
         return .usage_error;
     }
     const arg = args[0];
+    if (std.mem.eql(u8, arg, "--list") or std.mem.eql(u8, arg, "-l")) {
+        return cmdExplainList();
+    }
     // Accept lower- or upper-case input; normalize to upper for lookup.
     var upper_buf: [16]u8 = undefined;
     if (arg.len > upper_buf.len) {
@@ -644,10 +647,19 @@ fn cmdExplain(args: [][:0]u8) !ExitCode {
 
     const code = compiler.diagnostics.codeFromId(upper) orelse {
         ePrint("zpp explain: unknown diagnostic code '{s}'\n", .{arg});
-        ePrint("       run `zpp help` and check sema or parser docs.\n", .{});
+        ePrint("       run `zpp explain --list` to see every code.\n", .{});
         return .user_error;
     };
     oPrint("{s}\n", .{compiler.diagnostics.explain(code)});
+    return .ok;
+}
+
+fn cmdExplainList() !ExitCode {
+    oPrint("Diagnostic codes:\n\n", .{});
+    for (compiler.diagnostics.all_codes) |code| {
+        oPrint("  {s}  {s}\n", .{ code.id(), compiler.diagnostics.summary(code) });
+    }
+    oPrint("\nRun `zpp explain Z####` for the full description, triggering example, and fix.\n", .{});
     return .ok;
 }
 
@@ -911,5 +923,15 @@ test "explain finds every code by id" {
         try std.testing.expectEqual(c, looked_up);
         // Every code has a non-empty explanation.
         try std.testing.expect(compiler.diagnostics.explain(c).len > 50);
+    }
+}
+
+test "all_codes covers every Code variant exactly once" {
+    const fields = @typeInfo(compiler.diagnostics.Code).@"enum".fields;
+    try std.testing.expectEqual(fields.len, compiler.diagnostics.all_codes.len);
+    // Each code in all_codes also has a non-empty summary().
+    for (compiler.diagnostics.all_codes) |c| {
+        try std.testing.expect(compiler.diagnostics.summary(c).len > 0);
+        try std.testing.expect(!std.mem.startsWith(u8, compiler.diagnostics.summary(c), "Z"));
     }
 }
