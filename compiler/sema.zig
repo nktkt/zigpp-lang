@@ -42,6 +42,7 @@ pub const Sema = struct {
         try self.checkImpls(file, &result);
         try self.checkParams(file, &result);
         try self.checkFunctions(file, &result);
+        try self.checkEffectInference(file);
 
         return result;
     }
@@ -198,7 +199,8 @@ pub const Sema = struct {
         const body = fd.body orelse return;
         try self.checkUsing(body, r);
         try self.checkMoves(body);
-        try self.checkEffects(fd, body);
+        // Z0030 (effect inference) is no longer per-fn — it's a whole-file
+        // pass run from `analyze()` after the call graph has been built.
     }
 
     fn checkUsing(self: *Sema, body: ast.FnBody, r: *SemaResult) !void {
@@ -404,33 +406,149 @@ pub const Sema = struct {
         }
     }
 
-    fn checkEffects(self: *Sema, fd: *const ast.FnDecl, body: ast.FnBody) !void {
-        const ef = fd.sig.effects orelse return;
-        var noalloc = false;
-        for (ef.effects) |e| {
-            if (e.kind == .noalloc) noalloc = true;
+    /// Effect inference (Z0030). For each top-level fn we compute whether its
+    /// body — directly or transitively through one round of fixed-point — has
+    /// the `.alloc` effect. Then for every fn that *declares* `effects(.noalloc)`
+    /// we emit Z0030 if the inferred set contains `.alloc`.
+    ///
+    /// Heuristic for "direct allocation": the body text contains a method call
+    /// matching `.alloc(`, `.create(`, `.realloc(`, or `.dupe(` (after skipping
+    /// strings / chars / line comments). This intentionally re-uses the same
+    /// shape the previous Z0030 lint relied on.
+    ///
+    /// Heuristic for "calls into another fn": the body text contains `<name>(`
+    /// for any `<name>` that appears in our local fn-name table. This captures
+    /// both `try f(...)` and bare `f(...)` calls. Cross-file calls are not
+    /// inferred (out of scope for the MVP).
+    ///
+    /// Fixed point: iterate until no fn flips from "no .alloc" to ".alloc".
+    /// In the worst case this runs N rounds for N fns; in practice it
+    /// terminates after one or two passes.
+    fn checkEffectInference(self: *Sema, file: *const ast.File) !void {
+        // Collect all top-level fns (plain, owned-struct, struct, impl-block
+        // members) into a flat list with stable indices.
+        var fns: std.ArrayList(*const ast.FnDecl) = .{};
+        defer fns.deinit(self.allocator);
+        for (file.decls) |*d| {
+            switch (d.*) {
+                .fn_decl => |*fd| try fns.append(self.allocator, fd),
+                .impl_block => |ib| for (ib.fns) |*fd| try fns.append(self.allocator, fd),
+                .owned_struct => |os| for (os.fns) |*fd| try fns.append(self.allocator, fd),
+                .struct_decl => |sd| for (sd.fns) |*fd| try fns.append(self.allocator, fd),
+                else => {},
+            }
         }
-        if (!noalloc) return;
+        if (fns.items.len == 0) return;
 
-        for (body.stmts) |s| {
-            const text = switch (s) {
-                .raw => |r| r.text,
-                .using_stmt => |u| u.init_text,
-                .own_decl => |o| o.init_text,
-                else => continue,
-            };
-            if (callsAllocator(text)) {
-                try self.diags.emit(
-                    .err,
-                    .z0030_effect_violation,
-                    switch (s) {
+        // Map fn name → index. When two fns share a name (e.g. `init` on
+        // multiple structs) the first wins; the heuristic doesn't try to
+        // resolve overloads.
+        var name_to_idx = std.StringHashMap(usize).init(self.allocator);
+        defer name_to_idx.deinit();
+        for (fns.items, 0..) |fd, i| {
+            const gop = try name_to_idx.getOrPut(fd.sig.name);
+            if (!gop.found_existing) gop.value_ptr.* = i;
+        }
+
+        // direct[i] = true if fn i's body has a literal `.alloc(`/`.create(`/
+        //             `.realloc(`/`.dupe(` call (after skipping strings/chars/
+        //             comments). Also used as the seed for the fixed point.
+        // direct_span[i] = the first stmt span where the local allocation was
+        //                  observed (used to anchor Z0030 at the offending
+        //                  statement when possible).
+        const N = fns.items.len;
+        const direct = try self.allocator.alloc(bool, N);
+        defer self.allocator.free(direct);
+        const direct_span = try self.allocator.alloc(diag.Span, N);
+        defer self.allocator.free(direct_span);
+        const inferred = try self.allocator.alloc(bool, N);
+        defer self.allocator.free(inferred);
+
+        // calls[i] = list of callee indices that fn i references in its body
+        // text. Only names present in `name_to_idx` are recorded.
+        const calls = try self.allocator.alloc(std.ArrayList(usize), N);
+        defer {
+            for (calls) |*c| c.deinit(self.allocator);
+            self.allocator.free(calls);
+        }
+        for (calls) |*c| c.* = .{};
+
+        for (fns.items, 0..) |fd, i| {
+            direct[i] = false;
+            direct_span[i] = fd.sig.span;
+            inferred[i] = false;
+            const body = fd.body orelse continue;
+            for (body.stmts) |s| {
+                const text = switch (s) {
+                    .raw => |r| r.text,
+                    .using_stmt => |u| u.init_text,
+                    .own_decl => |o| o.init_text,
+                    else => continue,
+                };
+                if (!direct[i] and bodyAllocates(text)) {
+                    direct[i] = true;
+                    direct_span[i] = switch (s) {
                         .raw => |r| r.span,
                         .using_stmt => |u| u.span,
                         .own_decl => |o| o.span,
                         else => unreachable,
-                    },
-                    "fn declared 'noalloc' contains an allocating call",
-                    .{},
+                    };
+                }
+                // Record local-fn calls. We scan once per stmt and dedupe via
+                // the calls list (cheap for typical body sizes).
+                try collectLocalCalls(text, &name_to_idx, &calls[i], self.allocator);
+            }
+            inferred[i] = direct[i];
+        }
+
+        // Fixed-point propagation: a fn inherits `.alloc` from any callee.
+        // Capped at N+1 rounds to guard against pathological inputs (each
+        // round flips at least one fn or terminates).
+        var changed = true;
+        var rounds: usize = 0;
+        while (changed and rounds < N + 1) : (rounds += 1) {
+            changed = false;
+            for (fns.items, 0..) |_, i| {
+                if (inferred[i]) continue;
+                for (calls[i].items) |cid| {
+                    if (inferred[cid]) {
+                        inferred[i] = true;
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Emit Z0030 for any fn that declares `.noalloc` and has inferred
+        // `.alloc`. We prefer the direct-allocation span when available (the
+        // local body itself allocates) and otherwise fall back to the fn's
+        // signature span (purely transitive case).
+        for (fns.items, 0..) |fd, i| {
+            const ef = fd.sig.effects orelse continue;
+            var declared_noalloc = false;
+            for (ef.effects) |e| {
+                if (e.kind == .noalloc) declared_noalloc = true;
+            }
+            if (!declared_noalloc) continue;
+            if (!inferred[i]) continue;
+
+            const span = if (direct[i]) direct_span[i] else fd.sig.span;
+            if (direct[i]) {
+                try self.diags.emit(
+                    .err,
+                    .z0030_effect_violation,
+                    span,
+                    "fn '{s}' declared .noalloc but inferred .alloc effect",
+                    .{fd.sig.name},
+                );
+            } else {
+                try self.diags.emit(
+                    .err,
+                    .z0030_effect_violation,
+                    span,
+                    "fn '{s}' declared .noalloc but inferred .alloc effect (transitively via a callee)",
+                    .{fd.sig.name},
                 );
             }
         }
@@ -453,29 +571,116 @@ fn joinNames(allocator: std.mem.Allocator, names: []const []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-fn callsAllocator(text: []const u8) bool {
-    if (containsToken(text, "alloc")) return true;
-    if (containsToken(text, "create")) return true;
-    if (containsToken(text, "Allocator")) return true;
-    if (containsToken(text, "ArrayList")) return true;
+/// Heuristic for "this body directly allocates": look for a method-call
+/// shape `.alloc(`, `.create(`, `.realloc(`, or `.dupe(` anywhere in `text`,
+/// after stripping string / char literals and `//` comments so allocator
+/// names mentioned in error messages don't trip the check.
+fn bodyAllocates(text: []const u8) bool {
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = text[i];
+        // Skip over double-quoted string literals.
+        if (c == '"') {
+            i += 1;
+            while (i < text.len) : (i += 1) {
+                if (text[i] == '\\' and i + 1 < text.len) { i += 1; continue; }
+                if (text[i] == '"') { i += 1; break; }
+            }
+            continue;
+        }
+        // Skip over char literals.
+        if (c == '\'') {
+            i += 1;
+            while (i < text.len and text[i] != '\'') : (i += 1) {
+                if (text[i] == '\\' and i + 1 < text.len) i += 1;
+            }
+            if (i < text.len) i += 1;
+            continue;
+        }
+        // Skip over `//` line comments.
+        if (c == '/' and i + 1 < text.len and text[i + 1] == '/') {
+            while (i < text.len and text[i] != '\n') i += 1;
+            continue;
+        }
+        // Look for `.<name>(` where <name> ∈ {alloc, create, realloc, dupe}.
+        // The trailing `(` doubles as a token-boundary check — `.allocator(`
+        // won't match because text after `alloc` would be `a`, not `(`.
+        if (c == '.') {
+            const after_dot = i + 1;
+            inline for (.{ "alloc", "create", "realloc", "dupe" }) |needle| {
+                if (after_dot + needle.len < text.len and
+                    std.mem.eql(u8, text[after_dot .. after_dot + needle.len], needle) and
+                    text[after_dot + needle.len] == '(')
+                {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
     return false;
 }
 
-/// Returns true if any token in `text` contains `needle` as a substring,
-/// where token boundaries are non-identifier characters.
-fn containsToken(text: []const u8, needle: []const u8) bool {
+/// Scan `text` for any identifier in `name_to_idx` that is followed (after
+/// whitespace) by `(`. Append each matched callee's index into `out`,
+/// deduplicating against entries already present. Skips strings / chars /
+/// `//` comments so source written in messages doesn't count.
+fn collectLocalCalls(
+    text: []const u8,
+    name_to_idx: *const std.StringHashMap(usize),
+    out: *std.ArrayList(usize),
+    allocator: std.mem.Allocator,
+) !void {
     var i: usize = 0;
     while (i < text.len) {
-        if (isIdent(text[i])) {
+        const c = text[i];
+        if (c == '"') {
+            i += 1;
+            while (i < text.len) : (i += 1) {
+                if (text[i] == '\\' and i + 1 < text.len) { i += 1; continue; }
+                if (text[i] == '"') { i += 1; break; }
+            }
+            continue;
+        }
+        if (c == '\'') {
+            i += 1;
+            while (i < text.len and text[i] != '\'') : (i += 1) {
+                if (text[i] == '\\' and i + 1 < text.len) i += 1;
+            }
+            if (i < text.len) i += 1;
+            continue;
+        }
+        if (c == '/' and i + 1 < text.len and text[i + 1] == '/') {
+            while (i < text.len and text[i] != '\n') i += 1;
+            continue;
+        }
+        if (isIdent(c)) {
+            // Identifier-prefix-of-an-identifier (e.g. the `foo` in `foobar`)
+            // would pre-emptively match — guard with a "previous char was not
+            // an identifier char" check.
+            if (i > 0 and isIdent(text[i - 1])) {
+                i += 1;
+                continue;
+            }
             const start = i;
             while (i < text.len and isIdent(text[i])) i += 1;
             const tok = text[start..i];
-            if (std.mem.indexOf(u8, tok, needle)) |_| return true;
-        } else {
-            i += 1;
+            // Skip whitespace and look for `(`.
+            var j = i;
+            while (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
+            if (j < text.len and text[j] == '(') {
+                if (name_to_idx.get(tok)) |idx| {
+                    var present = false;
+                    for (out.items) |existing| {
+                        if (existing == idx) { present = true; break; }
+                    }
+                    if (!present) try out.append(allocator, idx);
+                }
+            }
+            continue;
         }
+        i += 1;
     }
-    return false;
 }
 
 /// Find the next occurrence of `move <ident>` starting at `from`. Returns
