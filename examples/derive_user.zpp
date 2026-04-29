@@ -1,19 +1,22 @@
-/// derive_user.zpp — `derive(.{ Hash, Debug, Eq })` on a plain struct.
+/// derive_user.zpp — `derive(.{ Hash, Debug, Eq, Ord, Default, Iterator,
+/// Serialize, Compare, FromStr })` on a plain struct.
 ///
 /// Teaches: `derive` runs at comptime and synthesizes well-known trait
 /// implementations from the struct's field list. The generated functions
 /// are attached as decls on the type so they're visible at use sites:
-/// `User.hash`, `User.eq`, `User.debug.format`.
+/// `User.hash`, `User.eq`, `User.debug.format`, `user.iter()`,
+/// `user.serialize(allocator)`, `User.lt(a, b)`, `User.fromStr(s, allocator)`.
 ///
 /// Lowered Zig sketch:
 ///     const User = struct {
 ///         id: u64,
 ///         name: []const u8,
-///         pub fn hash(self: User) u64 { ...fnv1a over fields... }
+///         pub fn hash(self: User) u64 { ...wyhash over fields... }
 ///         pub fn eq(a: User, b: User) bool { return a.id == b.id and std.mem.eql(u8, a.name, b.name); }
-///         pub const debug = struct {
-///             pub fn format(self: User, w: anytype) !void { ... }
-///         };
+///         pub fn iter(self: User) zpp.derive.Iterator(User).FieldIter { ... }
+///         pub fn serialize(self: User, a: std.mem.Allocator) ![]u8 { ... }
+///         pub fn lt(a: User, b: User) bool { ... }
+///         pub fn fromStr(s: []const u8, a: std.mem.Allocator) !User { ... }
 ///     };
 
 const std = @import("std");
@@ -22,7 +25,7 @@ const zpp = @import("zpp");
 struct User {
     id: u64,
     name: []const u8,
-} derive(.{ Hash, Debug, Eq, Ord, Default });
+} derive(.{ Hash, Debug, Eq, Ord, Default, Iterator, Serialize, Compare, FromStr });
 
 pub fn main() !void {
     const a = User{ .id = 1, .name = "ada" };
@@ -40,4 +43,25 @@ pub fn main() !void {
     var w = std.Io.Writer.fixed(&buf);
     try User.debug.format(a, &w);
     std.debug.print("debug(a) = {s}\n", .{w.buffered()});
+
+    // Iterator: yields field names in declaration order.
+    var it = a.iter();
+    std.debug.print("fields = ", .{});
+    while (it.next()) |name| std.debug.print("{s} ", .{name});
+    std.debug.print("\n", .{});
+
+    // Compare: lt/le/gt/ge backed by Ord.cmp.
+    std.debug.print("a.lt(c) = {}, c.gt(a) = {}\n", .{ a.lt(c), c.gt(a) });
+
+    // Serialize / FromStr: round-trip via an arena so the parsed string
+    // duplicates are freed in one shot.
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    const s = try a.serialize(aa);
+    std.debug.print("serialize(a) = {s}\n", .{s});
+
+    const back = try User.fromStr("id=42,name=grace", aa);
+    std.debug.print("fromStr -> User{{ .id = {d}, .name = \"{s}\" }}\n", .{ back.id, back.name });
 }

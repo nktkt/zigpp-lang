@@ -1,0 +1,4 @@
+struct Account {
+    id: u32,
+    name: []const u8,
+} derive(.{ Iterator, Serialize, Compare, FromStr });
