@@ -161,11 +161,13 @@ fn addTestsForTree(
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.path, ".zig")) continue;
         if (std.mem.endsWith(u8, entry.path, "build.zig")) continue;
-        // Path separator differs across platforms; check both.
-        if (std.mem.indexOf(u8, entry.path, "lowering/snapshots") != null) continue;
-        if (std.mem.indexOf(u8, entry.path, "lowering/inputs") != null) continue;
-        if (std.mem.indexOf(u8, entry.path, "lowering\\snapshots") != null) continue;
-        if (std.mem.indexOf(u8, entry.path, "lowering\\inputs") != null) continue;
+        // Path separator differs across platforms; check both. The trailing
+        // slash matters: it excludes the snapshot data dirs without also
+        // excluding the runner `tests/lowering/snapshots.zig`.
+        if (std.mem.indexOf(u8, entry.path, "lowering/snapshots/") != null) continue;
+        if (std.mem.indexOf(u8, entry.path, "lowering/inputs/") != null) continue;
+        if (std.mem.indexOf(u8, entry.path, "lowering\\snapshots\\") != null) continue;
+        if (std.mem.indexOf(u8, entry.path, "lowering\\inputs\\") != null) continue;
 
         const rel = std.fs.path.join(b.allocator, &.{ sub, entry.path }) catch continue;
         const tmod = b.createModule(.{

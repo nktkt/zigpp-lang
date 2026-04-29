@@ -64,3 +64,48 @@ test "derive.Hash produces stable hashes for the same value" {
     try std.testing.expectEqual(a, b);
     try std.testing.expect(a != c);
 }
+
+test "derive round-trip: Serialize + FromStr on a flat struct" {
+    if (!@hasDecl(zpp.derive, "Serialize") or !@hasDecl(zpp.derive, "FromStr")) {
+        return error.SkipZigTest;
+    }
+    const Row = struct {
+        id: u32,
+        flag: bool,
+    };
+    const a = std.testing.allocator;
+
+    const v = Row{ .id = 9, .flag = true };
+    const wire = try zpp.derive.Serialize(Row).serialize(v, a);
+    defer a.free(wire);
+    try std.testing.expectEqualStrings("id=9;flag=true", wire);
+
+    // Serialize uses ';', FromStr uses ',' so swap separators for the round-trip.
+    const for_parse = try std.mem.replaceOwned(u8, a, wire, ";", ",");
+    defer a.free(for_parse);
+
+    const back = try zpp.derive.FromStr(Row).parse(for_parse, a);
+    try std.testing.expectEqual(v.id, back.id);
+    try std.testing.expectEqual(v.flag, back.flag);
+}
+
+test "derive.Compare lt/le/gt/ge agree with Ord.cmp" {
+    if (!@hasDecl(zpp.derive, "Compare")) return error.SkipZigTest;
+    const Pair = struct { a: i32, b: i32 };
+    const lo = Pair{ .a = 1, .b = 2 };
+    const hi = Pair{ .a = 1, .b = 3 };
+    const C = zpp.derive.Compare(Pair);
+    try std.testing.expect(C.lt(lo, hi));
+    try std.testing.expect(C.le(lo, lo));
+    try std.testing.expect(C.gt(hi, lo));
+    try std.testing.expect(C.ge(hi, hi));
+}
+
+test "derive.Iterator yields field names in declaration order" {
+    if (!@hasDecl(zpp.derive, "Iterator")) return error.SkipZigTest;
+    const Row = struct { id: u32, flag: bool };
+    var it = zpp.derive.Iterator(Row).iter(.{ .id = 0, .flag = false });
+    try std.testing.expectEqualStrings("id", it.next().?);
+    try std.testing.expectEqualStrings("flag", it.next().?);
+    try std.testing.expect(it.next() == null);
+}

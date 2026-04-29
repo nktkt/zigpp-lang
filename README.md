@@ -81,7 +81,7 @@ zpp lower examples/hello_trait.zpp
 - **`own var x`** + **`move x`** — affine ownership with use-after-move detection (Z0020)
 - **`requires(cond)` / `ensures(cond)`** — runtime contracts via `zpp.contract.*`; `ensures` runs on every scope exit via `defer`
 - **`effects(.noalloc)`** — sema lint that flags allocator usage in pure functions (Z0030)
-- **`derive(.{ Hash, Eq, Debug, Json })`** — comptime helpers injected as struct methods so `a.hash()` and `User.eq(a, b)` work directly
+- **`derive(.{ Hash, Eq, Ord, Default, Clone, Debug, Json, Iterator, Serialize, Compare, FromStr })`** — comptime helpers injected as struct methods so `a.hash()`, `User.eq(a, b)`, `a.iter()`, `a.serialize(arena)`, `User.fromStr(s, arena)`, and `User.lt(a, b)` work directly
 - **`where T: Trait`** — generic constraint syntax (informational, drops at lowering)
 - **End-to-end pipeline** verified: 8 example programs compile and run through `zpp run` AND `zig build e2e`
 - **Fuzz-clean**: 83,000 generated/mutated inputs through the parser/sema/lowerer with zero panics, leaks, or timeouts

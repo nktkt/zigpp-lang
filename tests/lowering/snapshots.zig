@@ -5,6 +5,7 @@ const cases = [_][]const u8{
     "hello_using",
     "trait_simple",
     "dyn_call",
+    "derive_extras",
 };
 
 const max_file_bytes: usize = 4 * 1024 * 1024;
@@ -69,6 +70,10 @@ test "snapshot: trait_simple" {
 
 test "snapshot: dyn_call" {
     try runOne(std.testing.allocator, "dyn_call");
+}
+
+test "snapshot: derive_extras" {
+    try runOne(std.testing.allocator, "derive_extras");
 }
 
 test "snapshot manifest is non-empty" {
