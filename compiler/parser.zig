@@ -640,9 +640,28 @@ pub const Parser = struct {
                 .panic
             else if (std.mem.eql(u8, text, "nopanic"))
                 .nopanic
+            else if (std.mem.eql(u8, text, "custom"))
+                .custom
+            else if (std.mem.eql(u8, text, "nocustom"))
+                .nocustom
             else
                 .custom;
-            try list.append(self.allocator, .{ .kind = kind, .text = text });
+            // `.custom("name")` / `.nocustom("name")`: consume the
+            // parenthesised string-literal payload and store the inner
+            // name (without quotes) on the effect.
+            var name: []const u8 = "";
+            if ((kind == .custom or kind == .nocustom) and self.check(.l_paren)) {
+                _ = try self.expect(.l_paren, "custom effect (");
+                const lit = try self.expect(.string_literal, "custom effect name string");
+                const raw = lit.slice(self.source);
+                // Strip a single pair of surrounding `"` quotes if present.
+                name = if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"')
+                    raw[1 .. raw.len - 1]
+                else
+                    raw;
+                _ = try self.expect(.r_paren, "custom effect )");
+            }
+            try list.append(self.allocator, .{ .kind = kind, .text = text, .name = name });
             if (!self.match(.comma)) break;
         }
         const close = try self.expect(.r_paren, "effects close");

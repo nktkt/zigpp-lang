@@ -4,13 +4,21 @@ const diag = @import("diagnostics.zig");
 
 /// Per-fn effect set produced by the inference passes. Each flag is true
 /// iff sema's heuristic concluded the fn (transitively) exhibits that
-/// effect. Used by `@effectsOf(f)` lowering and by the Z0030 violation
-/// emitter.
+/// effect. Used by `@effectsOf(f)` lowering and by the Z0030/Z0060
+/// violation emitters.
 pub const InferredEffects = packed struct {
     alloc: bool = false,
     io: bool = false,
     panic: bool = false,
 };
+
+/// Per-fn list of `.custom("X")` effect names (the `X` slices, deduplicated).
+/// Sibling to the `InferredEffects` packed struct above — kept separate
+/// because the set is open-ended (each fn can carry an arbitrary number of
+/// custom names) and packing it into the struct would force a fixed cap.
+/// Slices point into the original source / AST arena and are not freed.
+pub const CustomEffectList = std.ArrayList([]const u8);
+pub const CustomEffectMap = std.StringHashMap(CustomEffectList);
 
 /// Result of semantic analysis. The maps are owned by `deinit`.
 pub const SemaResult = struct {
@@ -22,18 +30,25 @@ pub const SemaResult = struct {
     trait_methods: std.StringHashMap([]const ast.TraitMethod),
     /// Map of owned-struct names → whether they have a deinit method.
     owned_structs: std.StringHashMap(bool),
-    /// Inferred effect set per same-file fn name. Populated by the three
+    /// Inferred effect set per same-file fn name. Populated by the four
     /// `check*EffectInference` passes (each tees its result into this
     /// table at the end of the fixed-point loop). When two fns share a
     /// name (e.g. `init` on multiple structs) the first one wins — the
     /// MVP does not resolve overloads.
     inferred_effects: std.StringHashMap(InferredEffects),
+    /// Inferred `.custom("X")` effect names per same-file fn. Populated
+    /// by `checkCustomEffectInference`. Same fn-name sharing rule as
+    /// `inferred_effects`.
+    inferred_custom_effects: CustomEffectMap,
 
     pub fn deinit(self: *SemaResult) void {
         self.traits.deinit();
         self.trait_methods.deinit();
         self.owned_structs.deinit();
         self.inferred_effects.deinit();
+        var it = self.inferred_custom_effects.valueIterator();
+        while (it.next()) |list| list.deinit(self.allocator);
+        self.inferred_custom_effects.deinit();
     }
 };
 
@@ -52,6 +67,7 @@ pub const Sema = struct {
             .trait_methods = std.StringHashMap([]const ast.TraitMethod).init(self.allocator),
             .owned_structs = std.StringHashMap(bool).init(self.allocator),
             .inferred_effects = std.StringHashMap(InferredEffects).init(self.allocator),
+            .inferred_custom_effects = CustomEffectMap.init(self.allocator),
         };
         errdefer result.deinit();
 
@@ -63,6 +79,7 @@ pub const Sema = struct {
         try self.checkEffectInference(file, &result);
         try self.checkIoEffectInference(file, &result);
         try self.checkPanicEffectInference(file, &result);
+        try self.checkCustomEffectInference(file, &result);
 
         return result;
     }
@@ -951,7 +968,170 @@ pub const Sema = struct {
             }
         }
     }
+
+    /// Round 5 of the effect-inference MVP: user-defined `.custom("X")`
+    /// effects with `.nocustom("X")` as the matching denial.
+    ///
+    /// Unlike the alloc/io/panic passes (which infer effects from body
+    /// substrings), `.custom("X")` is propagated **only** from explicit
+    /// declarations. A fn carries `.custom("X")` iff
+    ///
+    ///   1. its own `effects(...)` annotation declares `.custom("X")`, OR
+    ///   2. it calls (via `<name>(`) a same-file fn whose declared
+    ///      `effects(...)` includes `.custom("X")` — propagated through
+    ///      one fixed-point loop so transitive chains are caught.
+    ///
+    /// A fn that declares `effects(.nocustom("X"))` and ends up with
+    /// `.custom("X")` in its inferred set triggers Z0060. The diagnostic
+    /// is anchored at the fn's signature span (we don't try to localise
+    /// to a body stmt — the call graph is name-only and we'd be guessing).
+    fn checkCustomEffectInference(self: *Sema, file: *const ast.File, result: *SemaResult) !void {
+        var fns: std.ArrayList(*const ast.FnDecl) = .{};
+        defer fns.deinit(self.allocator);
+        for (file.decls) |*d| {
+            switch (d.*) {
+                .fn_decl => |*fd| try fns.append(self.allocator, fd),
+                .impl_block => |ib| for (ib.fns) |*fd| try fns.append(self.allocator, fd),
+                .owned_struct => |os| for (os.fns) |*fd| try fns.append(self.allocator, fd),
+                .struct_decl => |sd| for (sd.fns) |*fd| try fns.append(self.allocator, fd),
+                else => {},
+            }
+        }
+        if (fns.items.len == 0) return;
+
+        var name_to_idx = std.StringHashMap(usize).init(self.allocator);
+        defer name_to_idx.deinit();
+        for (fns.items, 0..) |fd, i| {
+            const gop = try name_to_idx.getOrPut(fd.sig.name);
+            if (!gop.found_existing) gop.value_ptr.* = i;
+        }
+
+        const N = fns.items.len;
+
+        // Per-fn declared-custom set (the seed) and inferred-custom set
+        // (post fixed-point). Both are arrays of name slices, deduplicated.
+        const declared = try self.allocator.alloc(std.ArrayList([]const u8), N);
+        defer {
+            for (declared) |*l| l.deinit(self.allocator);
+            self.allocator.free(declared);
+        }
+        for (declared) |*l| l.* = .{};
+        const inferred = try self.allocator.alloc(std.ArrayList([]const u8), N);
+        defer {
+            for (inferred) |*l| l.deinit(self.allocator);
+            self.allocator.free(inferred);
+        }
+        for (inferred) |*l| l.* = .{};
+
+        // Per-fn local-call edges (same shape as the other passes).
+        const calls = try self.allocator.alloc(std.ArrayList(usize), N);
+        defer {
+            for (calls) |*c| c.deinit(self.allocator);
+            self.allocator.free(calls);
+        }
+        for (calls) |*c| c.* = .{};
+
+        // Seed: collect each fn's declared `.custom("X")` names and record
+        // the body's local-fn callee edges. `.nocustom(...)` is NOT seeded
+        // — it's purely a denial (checked at the end against the inferred
+        // set).
+        for (fns.items, 0..) |fd, i| {
+            if (fd.sig.effects) |ef| {
+                for (ef.effects) |e| {
+                    if (e.kind == .custom and e.name.len > 0) {
+                        _ = try addUniqueName(&declared[i], self.allocator, e.name);
+                        _ = try addUniqueName(&inferred[i], self.allocator, e.name);
+                    }
+                }
+            }
+            const body = fd.body orelse continue;
+            for (body.stmts) |s| {
+                const text = switch (s) {
+                    .raw => |r| r.text,
+                    .using_stmt => |u| u.init_text,
+                    .own_decl => |o| o.init_text,
+                    else => continue,
+                };
+                try collectLocalCalls(text, &name_to_idx, &calls[i], self.allocator);
+            }
+        }
+
+        // Fixed-point: a fn inherits every `.custom("X")` declared by any
+        // fn it calls. Propagation reads from `declared` (the explicit
+        // annotation set) so a chain A→B→C with C declaring `.custom("X")`
+        // still flows up to A. Cap at N+1 rounds; in practice converges in
+        // one or two passes.
+        var changed = true;
+        var rounds: usize = 0;
+        while (changed and rounds < N + 1) : (rounds += 1) {
+            changed = false;
+            for (fns.items, 0..) |_, i| {
+                for (calls[i].items) |cid| {
+                    for (declared[cid].items) |name| {
+                        if (try addUniqueName(&inferred[i], self.allocator, name)) {
+                            changed = true;
+                        }
+                    }
+                    // Also propagate already-inferred names from the callee
+                    // so transitive chains converge in fewer rounds.
+                    for (inferred[cid].items) |name| {
+                        if (try addUniqueName(&inferred[i], self.allocator, name)) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Tee inferred custom-effect names into the result table so
+        // `@effectsOf(<ident>)` lowering can render them.
+        for (fns.items, 0..) |fd, i| {
+            if (inferred[i].items.len == 0) continue;
+            const gop = try result.inferred_custom_effects.getOrPut(fd.sig.name);
+            if (!gop.found_existing) gop.value_ptr.* = .{};
+            for (inferred[i].items) |name| {
+                _ = try addUniqueName(gop.value_ptr, self.allocator, name);
+            }
+        }
+
+        // Z0060: emit on every (fn, X) pair where the fn declares
+        // `.nocustom("X")` and the inferred set contains `.custom("X")`.
+        for (fns.items, 0..) |fd, i| {
+            const ef = fd.sig.effects orelse continue;
+            for (ef.effects) |e| {
+                if (e.kind != .nocustom) continue;
+                if (e.name.len == 0) continue;
+                var present = false;
+                for (inferred[i].items) |n| {
+                    if (std.mem.eql(u8, n, e.name)) { present = true; break; }
+                }
+                if (!present) continue;
+                try self.diags.emit(
+                    .err,
+                    .z0060_custom_effect_violation,
+                    fd.sig.span,
+                    "fn '{s}' declared .nocustom(\"{s}\") but inferred .custom(\"{s}\") effect",
+                    .{ fd.sig.name, e.name, e.name },
+                );
+            }
+        }
+    }
 };
+
+/// Append `name` to `list` if it isn't already present (string comparison).
+/// Returns true when an insertion occurred. Slices stored verbatim — they
+/// reference source / AST arena memory that outlives this pass.
+fn addUniqueName(
+    list: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    name: []const u8,
+) !bool {
+    for (list.items) |existing| {
+        if (std.mem.eql(u8, existing, name)) return false;
+    }
+    try list.append(allocator, name);
+    return true;
+}
 
 /// Heuristic: does `text` look like an allocator-using call? We check for
 /// identifiers containing "alloc"/"init"/"create" near a token that resembles

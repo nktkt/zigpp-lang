@@ -40,6 +40,7 @@ pub const Span = struct {
 ///     Z0030 effect annotation violated by inference
 ///     Z0040 impl missing trait method(s)
 ///     Z0050 @effectsOf(f) — fn name not declared in this file
+///     Z0060 .nocustom("X") violated by inferred .custom("X")
 ///   Z01xx — parser
 ///   Z02xx — lexer
 ///   Z03xx — lower
@@ -52,6 +53,7 @@ pub const Code = enum {
     z0030_effect_violation,
     z0040_impl_missing_method,
     z0050_unknown_fn_in_effects_of,
+    z0060_custom_effect_violation,
     z0100_unexpected_token,
     z0101_expected_identifier,
     z0102_expected_token,
@@ -70,6 +72,7 @@ pub const Code = enum {
             .z0030_effect_violation => "Z0030",
             .z0040_impl_missing_method => "Z0040",
             .z0050_unknown_fn_in_effects_of => "Z0050",
+            .z0060_custom_effect_violation => "Z0060",
             .z0100_unexpected_token => "Z0100",
             .z0101_expected_identifier => "Z0101",
             .z0102_expected_token => "Z0102",
@@ -94,6 +97,7 @@ pub fn hint(code: Code) ?[]const u8 {
         .z0030_effect_violation => "the function declared an effect it then violated. Remove the `effects(...)` annotation or eliminate the disallowed operation (allocation, IO, etc.).",
         .z0040_impl_missing_method => "every method declared on the trait must be implemented. Add the listed missing methods, or drop the impl block if you do not intend to satisfy the trait.",
         .z0050_unknown_fn_in_effects_of => "@effectsOf(f) only resolves names of functions declared in the same .zpp file. Spell-check the name, declare the fn locally, or wait for cross-file inference (separate proposal).",
+        .z0060_custom_effect_violation => "the function declared `effects(.nocustom(\"X\"))` but its body (or a transitive callee) declared `effects(.custom(\"X\"))`. Drop the `.nocustom` declaration, rename the effect, or refactor the call chain so the custom effect doesn't propagate.",
         .z0100_unexpected_token => "remove or replace the highlighted token. The parser was in the middle of a declaration or expression and could not continue.",
         .z0101_expected_identifier => "supply a name here, e.g. `fn name(...)`, `struct Name { ... }`, or `const name = ...`.",
         .z0102_expected_token => "insert the expected token. Most often a missing `;`, `,`, `)`, or `}` in the surrounding scope.",
@@ -283,6 +287,27 @@ pub fn explain(code: Code) []const u8 {
         \\
         \\Fix: spell the name correctly, declare the fn in this file, or
         \\drop the `@effectsOf` query until cross-file inference lands.
+        ,
+        .z0060_custom_effect_violation =>
+        \\Z0060: .nocustom("X") declared but inferred .custom("X")
+        \\
+        \\`effects(.custom("X"))` is a user-defined effect tag. A function may
+        \\both *declare* a custom effect (asserting it for the rest of sema /
+        \\callers) and *inherit* one transitively from a same-file callee that
+        \\declares the same name. `effects(.nocustom("X"))` is the negation:
+        \\it asserts the function does NOT have effect `X`. When inference
+        \\(declaration + one round of callee propagation) disagrees with that
+        \\assertion, sema reports Z0060.
+        \\
+        \\Triggers:
+        \\    fn doIt() void effects(.custom("net")) { ... }
+        \\    fn run() void effects(.nocustom("net")) {
+        \\        doIt();   // Z0060 — caller forbids "net" but callee declares it
+        \\    }
+        \\
+        \\Fix: drop the `.nocustom("X")` declaration on the caller, rename one
+        \\of the effects, or refactor the call chain so the custom effect
+        \\doesn't reach the caller.
         ,
         .z0100_unexpected_token =>
         \\Z0100: unexpected token
