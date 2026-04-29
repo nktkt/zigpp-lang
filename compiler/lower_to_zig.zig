@@ -7,6 +7,12 @@ const sema = @import("sema.zig");
 /// generic type. Owned by the caller (typically a `SemaResult`).
 pub const InferredEffectsMap = std.StringHashMap(sema.InferredEffects);
 
+/// Sibling alias for the per-fn `.custom("X")` name table that the
+/// `@effectsOf(<ident>)` lowering also consults. Owned by the caller
+/// (typically a `SemaResult`); each value is a list of name slices that
+/// reference the original source / AST arena and must outlive lowering.
+pub const InferredCustomEffectsMap = sema.CustomEffectMap;
+
 /// Lowering pass: walks an `ast.File` and produces a Zig source string.
 ///
 /// The lowering is intentionally textual: identifiers and types are kept as
@@ -28,6 +34,12 @@ pub const Lowerer = struct {
     /// sema entirely. When null, `@effectsOf(<ident>)` lowers to `""`
     /// and Z0050 is suppressed (we have no table to check against).
     inferred_effects: ?*const InferredEffectsMap = null,
+    /// Per-fn inferred `.custom("X")` name set, supplied by sema.
+    /// Sibling to `inferred_effects`; appended after the alloc/io/panic
+    /// axes so the lowered string keeps backwards compatibility (a fn
+    /// with no custom effects produces the exact same shape as before).
+    /// Optional for the same reasons as `inferred_effects`.
+    inferred_custom: ?*const InferredCustomEffectsMap = null,
 
     pub fn init(allocator: std.mem.Allocator, diags: *diag.Diagnostics) Lowerer {
         return .{
@@ -38,6 +50,7 @@ pub const Lowerer = struct {
             .extern_traits = std.StringHashMap(void).init(allocator),
             .impls_by_target = std.StringHashMap(std.ArrayList(*const ast.ImplBlock)).init(allocator),
             .inferred_effects = null,
+            .inferred_custom = null,
         };
     }
 
@@ -51,6 +64,21 @@ pub const Lowerer = struct {
     ) Lowerer {
         var lw = init(allocator, diags);
         lw.inferred_effects = effects;
+        return lw;
+    }
+
+    /// Same as `initWithEffects` but also wires the per-fn `.custom("X")`
+    /// table so the `@effectsOf(<ident>)` substitution can append the
+    /// `custom("X")` entries after the alloc/io/panic axes. Pass the map
+    /// straight from `sema.SemaResult.inferred_custom_effects`.
+    pub fn initWithEffectsAndCustom(
+        allocator: std.mem.Allocator,
+        diags: *diag.Diagnostics,
+        effects: *const InferredEffectsMap,
+        custom: *const InferredCustomEffectsMap,
+    ) Lowerer {
+        var lw = initWithEffects(allocator, diags, effects);
+        lw.inferred_custom = custom;
         return lw;
     }
 
@@ -449,6 +477,22 @@ pub const Lowerer = struct {
             try self.write("panic");
             first = false;
         }
+        // Append `custom("X")` entries (if any) after the alloc/io/panic
+        // axes. The order matches the sibling map's insertion order so
+        // the lowered string stays stable across runs. The leading axes
+        // are unchanged when no custom effects are present, which keeps
+        // the output backwards-compatible with round-4 lowering.
+        if (self.inferred_custom) |cmap| {
+            if (cmap.get(ident)) |list| {
+                for (list.items) |name| {
+                    if (!first) try self.write(",");
+                    try self.write("custom(\\\"");
+                    try self.write(name);
+                    try self.write("\\\")");
+                    first = false;
+                }
+            }
+        }
         try self.write("\"");
     }
 
@@ -753,6 +797,21 @@ pub fn lowerWithEffects(
     return lw.lowerFile(file);
 }
 
+/// Same as `lowerWithEffects` but also wires the per-fn `.custom("X")`
+/// table so `@effectsOf(<ident>)` substitutions can append the
+/// `custom("X")` entries after the alloc/io/panic axes.
+pub fn lowerWithEffectsAndCustom(
+    allocator: std.mem.Allocator,
+    file: *const ast.File,
+    diags: *diag.Diagnostics,
+    effects: *const InferredEffectsMap,
+    custom: *const InferredCustomEffectsMap,
+) ![]u8 {
+    var lw = Lowerer.initWithEffectsAndCustom(allocator, diags, effects, custom);
+    defer lw.deinit();
+    return lw.lowerFile(file);
+}
+
 test "lower using stmt" {
     const a = std.testing.allocator;
     const parser = @import("parser.zig");
@@ -838,4 +897,49 @@ test "lower @effectsOf substitutes the inferred string" {
     defer a.free(out);
     try std.testing.expect(std.mem.indexOf(u8, out, "return \"\";") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "return \"alloc,io\";") != null);
+}
+
+test "lower @effectsOf appends custom names after alloc/io/panic axes" {
+    // Direct unit test of the round-5 follow-up: when a fn has an
+    // inferred `.custom("X")` set, the substitution appends
+    // `custom("X")` entries after the alloc/io/panic axes (with the
+    // `"` doubly-escaped because the rewrite is itself emitted inside
+    // a Zig string literal). Mirrors the end-to-end coverage in
+    // tests/diagnostics/diags.zig.
+    const a = std.testing.allocator;
+    const parser = @import("parser.zig");
+    var diags = diag.Diagnostics.init(a);
+    defer diags.deinit();
+    var arena = ast.Arena.init(a);
+    defer arena.deinit();
+
+    var effects = InferredEffectsMap.init(a);
+    defer effects.deinit();
+    try effects.put("net_only", .{});
+    try effects.put("alloc_and_net", .{ .alloc = true });
+
+    var custom = InferredCustomEffectsMap.init(a);
+    defer {
+        var it = custom.valueIterator();
+        while (it.next()) |list| list.deinit(a);
+        custom.deinit();
+    }
+    var net_only_list: sema.CustomEffectList = .{};
+    try net_only_list.append(a, "net");
+    try custom.put("net_only", net_only_list);
+    var combo_list: sema.CustomEffectList = .{};
+    try combo_list.append(a, "net");
+    try custom.put("alloc_and_net", combo_list);
+
+    const src =
+        \\fn net_only() void {}
+        \\fn alloc_and_net() void {}
+        \\fn ask() []const u8 { return @effectsOf(net_only); }
+        \\fn ask2() []const u8 { return @effectsOf(alloc_and_net); }
+    ;
+    const file = try parser.parseSource(a, src, &arena, &diags);
+    const out = try lowerWithEffectsAndCustom(a, &file, &diags, &effects, &custom);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "return \"custom(\\\"net\\\")\";") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "return \"alloc,custom(\\\"net\\\")\";") != null);
 }

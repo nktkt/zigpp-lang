@@ -35,8 +35,10 @@ pub const SemaResult = sema.SemaResult;
 pub const Lowerer = lower_to_zig.Lowerer;
 pub const lower = lower_to_zig.lower;
 pub const lowerWithEffects = lower_to_zig.lowerWithEffects;
+pub const lowerWithEffectsAndCustom = lower_to_zig.lowerWithEffectsAndCustom;
 pub const InferredEffects = sema.InferredEffects;
 pub const InferredEffectsMap = lower_to_zig.InferredEffectsMap;
+pub const InferredCustomEffectsMap = lower_to_zig.InferredCustomEffectsMap;
 
 pub const locate = diagnostics.locate;
 
@@ -93,10 +95,18 @@ pub fn compileToZig(
     var s = sema.Sema.init(allocator, diags);
     var res = try s.analyze(&file);
     defer res.deinit();
-    // Pass the per-fn inferred-effect table into the lowerer so
-    // `@effectsOf(<ident>)` substitutions can resolve. Z0050 is emitted
-    // for unknown names on the lowering side via this table.
-    return lower_to_zig.lowerWithEffects(allocator, &file, diags, &res.inferred_effects);
+    // Pass the per-fn inferred-effect tables (axes + custom names) into
+    // the lowerer so `@effectsOf(<ident>)` substitutions can resolve.
+    // Z0050 is emitted for unknown names on the lowering side via the
+    // axes table; the custom table is consulted for the optional
+    // `custom("X")` suffix entries.
+    return lower_to_zig.lowerWithEffectsAndCustom(
+        allocator,
+        &file,
+        diags,
+        &res.inferred_effects,
+        &res.inferred_custom_effects,
+    );
 }
 
 test "end-to-end compile sample" {

@@ -378,11 +378,13 @@ test "Z0060: nocustom violated by transitive custom callee fires" {
     try std.testing.expect(hasCode(&result.diags, "Z0060"));
 }
 
-test "Z0050: @effectsOf still resolves a custom-effect-only fn (lowering MVP omits the name)" {
-    // Lowering for @effectsOf currently only emits the alloc/io/panic axes
-    // (round 4 shape). A fn whose only effect is `.custom("net")` therefore
-    // lowers to "" — no Z0050 — and emitting custom names through @effectsOf
-    // is left as a follow-up.
+test "@effectsOf surfaces a custom-effect-only fn as custom(\"net\")" {
+    // Round-5 follow-up: `@effectsOf(<ident>)` now appends each
+    // inferred `.custom("X")` name after the alloc/io/panic axes.
+    // A fn whose only effect is `.custom("net")` therefore lowers to
+    // `"custom(\"net\")"` (the inner `"` is escaped because the
+    // substitution itself sits inside a Zig double-quoted string
+    // literal). No Z0050 fires — sema knows about the fn.
     const a = std.testing.allocator;
     var diags = compiler.Diagnostics.init(a);
     defer diags.deinit();
@@ -393,5 +395,27 @@ test "Z0050: @effectsOf still resolves a custom-effect-only fn (lowering MVP omi
     const out = try compiler.compileToZig(a, src, &diags);
     defer a.free(out);
     try std.testing.expect(!hasCode(&diags, "Z0050"));
-    try std.testing.expect(std.mem.indexOf(u8, out, "return \"\";") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "return \"custom(\\\"net\\\")\";") != null);
+}
+
+test "@effectsOf appends custom(\"net\") after alloc when both are inferred" {
+    // A fn that both allocates AND declares `.custom("net")` lowers to
+    // `"alloc,custom(\"net\")"` — the custom entries trail the
+    // alloc/io/panic axes so existing consumers that only inspect the
+    // axes prefix keep working unchanged.
+    const a = std.testing.allocator;
+    var diags = compiler.Diagnostics.init(a);
+    defer diags.deinit();
+    const src =
+        \\const std = @import("std");
+        \\effects(.custom("net")) fn worker(al: std.mem.Allocator) !void {
+        \\    const xs = try al.alloc(u8, 1);
+        \\    _ = xs;
+        \\}
+        \\fn ask() []const u8 { return @effectsOf(worker); }
+    ;
+    const out = try compiler.compileToZig(a, src, &diags);
+    defer a.free(out);
+    try std.testing.expect(!hasCode(&diags, "Z0050"));
+    try std.testing.expect(std.mem.indexOf(u8, out, "return \"alloc,custom(\\\"net\\\")\";") != null);
 }
