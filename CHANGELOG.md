@@ -4,6 +4,13 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.25](https://github.com/nktkt/zigpp-lang/compare/v0.1.24...v0.1.25) (2026-04-29)
+
+
+### Features
+
+* **lsp:** textDocument/references + workspace/symbol ([a75d35c](https://github.com/nktkt/zigpp-lang/commit/a75d35cc2aa77215fca5d2de412c4494717f948b))
+
 ## [0.1.24](https://github.com/nktkt/zigpp-lang/compare/v0.1.23...v0.1.24) (2026-04-29)
 
 
