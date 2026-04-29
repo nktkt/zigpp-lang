@@ -4,6 +4,13 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.31](https://github.com/nktkt/zigpp-lang/compare/v0.1.30...v0.1.31) (2026-04-29)
+
+
+### Features
+
+* **sema:** .custom("name") effects + Z0060 (round 5) ([d3596df](https://github.com/nktkt/zigpp-lang/commit/d3596dfbccf624a7105ec8431cb167e3e76ea878))
+
 ## [0.1.30](https://github.com/nktkt/zigpp-lang/compare/v0.1.29...v0.1.30) (2026-04-29)
 
 
