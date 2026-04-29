@@ -225,11 +225,13 @@ fn addE2ESteps(
     while (walker.next() catch null) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.path, ".zpp")) continue;
-        // Multi-file projects live in examples/multi_file/ and have their
+        // Multi-file projects live in examples/multi_file*/ and have their
         // own dedicated step (see addMultiFileE2E). Skip them here so we
-        // do not try to build util.zpp as a stand-alone executable.
-        if (std.mem.indexOf(u8, entry.path, "multi_file/") != null) continue;
-        if (std.mem.indexOf(u8, entry.path, "multi_file\\") != null) continue;
+        // do not try to build util.zpp / api.zpp as stand-alone executables.
+        if (std.mem.startsWith(u8, entry.path, "multi_file/")) continue;
+        if (std.mem.startsWith(u8, entry.path, "multi_file_pub/")) continue;
+        if (std.mem.startsWith(u8, entry.path, "multi_file\\")) continue;
+        if (std.mem.startsWith(u8, entry.path, "multi_file_pub\\")) continue;
 
         const src_rel = std.fs.path.join(b.allocator, &.{ "examples", entry.path }) catch continue;
         const stem = entry.basename[0 .. entry.basename.len - 4];
