@@ -64,14 +64,17 @@ official Zig extension.
   is available in any LSP client (Vim, Emacs, Helix, Neovim) — not just
   VS Code. The original client-side provider remains registered as a
   fallback for diagnostics that pre-date the LSP-driven path.
-- **Semantic highlighting** (`textDocument/semanticTokens/full`): the
-  language server emits per-token classifications (keyword, string,
-  number, comment, function, interface, struct, variable) plus a
-  `declaration` modifier on the names of `fn` / `trait` / `struct` /
-  `owned struct` / `extern interface` decls. VS Code layers this on top
-  of the TextMate grammar so colours track the parser, not a regex.
-  Locals/parameters fall back to `variable`; method-receiver and type-
-  resolved highlighting are out of scope for this MVP.
+- **Semantic highlighting** (`textDocument/semanticTokens/full`,
+  `range`, and `full/delta`): the language server emits per-token
+  classifications (keyword, string, number, comment, function,
+  interface, struct, variable) plus a `declaration` modifier on the
+  names of `fn` / `trait` / `struct` / `owned struct` / `extern
+  interface` decls. VS Code layers this on top of the TextMate grammar
+  so colours track the parser, not a regex. `range` lets the editor
+  highlight only the visible viewport on large files; `full/delta`
+  ships only the changed quintuples between edits. Locals/parameters
+  fall back to `variable`; method-receiver and type-resolved
+  highlighting are out of scope for this MVP.
 - "Explain Diagnostic Code" command (`Cmd/Ctrl+Shift+E`) for direct
   lookup by code.
 - **Status bar item** that displays the detected `zpp` version (or a
@@ -140,13 +143,13 @@ code --install-extension zigpp-0.1.0.vsix
   `workspace/symbol` over open documents, same-file
   `textDocument/rename` (top-level decl names only),
   `textDocument/codeAction` (quick-fix `Explain Z####` per diagnostic),
-  and `textDocument/semanticTokens/full` (full-document semantic
-  highlighting). Cross-file go-to-definition, cross-file references,
-  cross-file rename, rename of parameters / locals / method names,
-  workspace search across un-opened files, context-aware completion,
-  method-on-receiver navigation, `semanticTokens/range` and
-  `semanticTokens/full/delta` (incremental updates), and
-  `WorkspaceEdit`-style auto-fix code actions are not implemented yet.
+  and `textDocument/semanticTokens/{full,range,full/delta}` (full,
+  viewport-restricted, and incremental highlighting). Cross-file
+  go-to-definition, cross-file references, cross-file rename, rename
+  of parameters / locals / method names, workspace search across
+  un-opened files, context-aware completion, method-on-receiver
+  navigation, and `WorkspaceEdit`-style auto-fix code actions are
+  not implemented yet.
 - Semantic highlighting now ships from the LSP. The TextMate grammar
   remains as a fallback for clients that don't speak semantic tokens, for
   documents the LSP fails to lex, and for the brief window before the
