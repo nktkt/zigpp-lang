@@ -76,6 +76,53 @@ test "Z0021: same code without borrow does not fire" {
     try std.testing.expect(!hasCode(&result.diags, "Z0021"));
 }
 
+test "Z0021: borrow inside a block does not invalidate move after the block" {
+    // Round-2 scope tracking: a `&x` recorded inside `{ ... }` retires
+    // when execution leaves the block. The subsequent `move x` therefore
+    // must not fire Z0021.
+    const a = std.testing.allocator;
+    const src =
+        \\fn run() void {
+        \\    own var x = Person{ .name = "Ada" };
+        \\    {
+        \\        const r = &x.name;
+        \\        _ = r;
+        \\    }
+        \\    const y = move x;
+        \\    _ = y;
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(!hasCode(&result.diags, "Z0021"));
+}
+
+test "Z0021: two borrows on same name still trigger one Z0021" {
+    // Round-2 multi-borrow tracking: appending a second `&x` must not
+    // duplicate the diagnostic. We expect exactly one Z0021 for the
+    // following `move x`.
+    const a = std.testing.allocator;
+    const src =
+        \\fn run() void {
+        \\    own var x = Person{ .name = "Ada" };
+        \\    const r1 = &x.name;
+        \\    const r2 = &x.name;
+        \\    const y = move x;
+        \\    _ = r1;
+        \\    _ = r2;
+        \\    _ = y;
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(hasCode(&result.diags, "Z0021"));
+    var z0021_count: usize = 0;
+    for (result.diags.items.items) |d| {
+        if (std.mem.eql(u8, d.code.id(), "Z0021")) z0021_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), z0021_count);
+}
+
 test "Z0021: borrow and move in different fns do not collide" {
     const a = std.testing.allocator;
     const src =

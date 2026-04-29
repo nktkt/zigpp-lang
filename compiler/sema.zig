@@ -251,6 +251,45 @@ pub const Sema = struct {
         }
     }
 
+    /// One outstanding `&x` borrow recorded by `checkMoves`. `span` is the
+    /// span of the surrounding statement (used for Z0021 messages).
+    /// `scope_depth` is the lexical block depth at which the borrow was
+    /// recorded — when execution later leaves a block (the brace counter
+    /// drops below this depth) the record is retired.
+    const BorrowRecord = struct {
+        span: diag.Span,
+        scope_depth: u32,
+    };
+
+    /// Per-name list of live borrows. We hand out and own the inner
+    /// ArrayLists, so `deinitBorrows` releases each one.
+    const BorrowMap = std.StringHashMap(std.ArrayList(BorrowRecord));
+
+    fn deinitBorrows(self: *Sema, borrows: *BorrowMap) void {
+        var it = borrows.valueIterator();
+        while (it.next()) |list| list.deinit(self.allocator);
+        borrows.deinit();
+    }
+
+    /// Drop every borrow record whose `scope_depth` is strictly greater
+    /// than `new_depth`. Called after a `}` lowers the brace counter so
+    /// that a `&x` inside `{ ... }` retires when the block closes.
+    fn retireBorrowsBelow(self: *Sema, borrows: *BorrowMap, new_depth: u32) void {
+        var it = borrows.iterator();
+        while (it.next()) |entry| {
+            const list = entry.value_ptr;
+            var write: usize = 0;
+            for (list.items) |rec| {
+                if (rec.scope_depth <= new_depth) {
+                    list.items[write] = rec;
+                    write += 1;
+                }
+            }
+            list.shrinkRetainingCapacity(write);
+        }
+        _ = self;
+    }
+
     fn checkMoves(self: *Sema, body: ast.FnBody) !void {
         var moved = std.StringHashMap(diag.Span).init(self.allocator);
         defer moved.deinit();
@@ -258,12 +297,16 @@ pub const Sema = struct {
         // are subject to affine checking.
         var own_names = std.StringHashMap(void).init(self.allocator);
         defer own_names.deinit();
-        // Borrow tracking (Z0021). For the MVP we only remember the FIRST
-        // `&x` per fn body (scope-local; the map is reset between fns). When
-        // we later see `move x` while `x` is borrowed we fire Z0021. Multi-
-        // borrow tracking (vector of spans per name) is a follow-up.
-        var borrows = std.StringHashMap(diag.Span).init(self.allocator);
-        defer borrows.deinit();
+        // Borrow tracking (Z0021). Round 2 records ALL `&x` sites per name
+        // and tags each with the lexical block depth at which it occurred.
+        // When a `}` drops the depth past a recorded borrow, that borrow
+        // retires. A subsequent `move x` therefore only fires Z0021 if at
+        // least one record is still live in an enclosing scope.
+        var borrows = BorrowMap.init(self.allocator);
+        defer self.deinitBorrows(&borrows);
+        // Lexical block depth tracked across raw stmts. Depth 0 == fn body
+        // top level; nested `{ ... }` inside a single raw stmt push/pop.
+        var depth: u32 = 0;
 
         for (body.stmts) |s| {
             switch (s) {
@@ -273,22 +316,14 @@ pub const Sema = struct {
                     _ = moved.remove(o.name);
                     // Re-bind also rescinds any outstanding borrow record:
                     // the new value is a fresh binding.
-                    _ = borrows.remove(o.name);
+                    if (borrows.getPtr(o.name)) |list| list.clearRetainingCapacity();
                     // The init expression itself may borrow another name.
-                    try self.recordBorrows(o.init_text, o.span, &borrows);
+                    try self.scanRawText(o.init_text, o.span, null, &borrows, &moved, &own_names, &depth);
                 },
                 .move_expr_stmt => |m| {
+                    try self.fireBorrowInvalidationIfLive(&borrows, m.target, m.span);
                     if (own_names.contains(m.target)) {
                         try moved.put(m.target, m.span);
-                    }
-                    if (borrows.contains(m.target)) {
-                        try self.diags.emit(
-                            .err,
-                            .z0021_borrow_invalidated_by_move,
-                            m.span,
-                            "cannot move '{s}' while borrowed",
-                            .{m.target},
-                        );
                     }
                 },
                 .using_stmt => |u| {
@@ -301,7 +336,7 @@ pub const Sema = struct {
                             .{ u.name, prev.start },
                         );
                     }
-                    try self.recordBorrows(u.init_text, u.span, &borrows);
+                    try self.scanRawText(u.init_text, u.span, null, &borrows, &moved, &own_names, &depth);
                 },
                 .raw => |raw| {
                     // First check uses against the moved set as it stands BEFORE
@@ -319,55 +354,86 @@ pub const Sema = struct {
                             _ = moved.remove(entry.key_ptr.*);
                         }
                     }
-                    // Then scan THIS statement's text for `move <ident>` patterns
-                    // and record them so the next statement sees them as moved.
-                    // If the moved name has an outstanding borrow recorded
-                    // earlier in this function body, fire Z0021 instead of
-                    // (in addition to) Z0020.
-                    var off: usize = 0;
-                    while (findMoveTarget(raw.text, off)) |found| {
-                        if (borrows.contains(found.name)) {
-                            try self.diags.emit(
-                                .err,
-                                .z0021_borrow_invalidated_by_move,
-                                raw.span,
-                                "cannot move '{s}' while borrowed",
-                                .{found.name},
-                            );
-                        }
-                        if (own_names.contains(found.name)) {
-                            try moved.put(found.name, raw.span);
-                        }
-                        off = found.end;
-                    }
-                    // Finally scan the same statement's text for new borrow
-                    // patterns (`&<ident>` / `&<ident>.field`) and record
-                    // the FIRST borrow per name. Order vs the move scan
-                    // above means a single stmt that borrows then moves is
-                    // not flagged — that's an acceptable false-negative
-                    // for the MVP (the heuristic is conservative).
-                    try self.recordBorrows(raw.text, raw.span, &borrows);
+                    // Then walk the raw text once, in order, handling brace
+                    // depth changes, `&ident` borrow sites and `move ident`
+                    // sites together. This keeps the relative ordering
+                    // correct when a single raw stmt opens a block, borrows
+                    // inside it, closes the block (retiring the borrow) and
+                    // then moves the same name — that case must NOT fire
+                    // Z0021.
+                    try self.scanRawText(raw.text, raw.span, raw.span, &borrows, &moved, &own_names, &depth);
                 },
             }
         }
+        // Defensive: at end-of-fn, clear anything left at depth > 0. The
+        // body span itself counts as depth 0 in our model (matches the MVP
+        // behaviour of borrows recorded at top level outliving the whole
+        // body). Anything deeper would indicate an unbalanced raw stmt and
+        // we just drop those records.
+        self.retireBorrowsBelow(&borrows, 0);
     }
 
-    /// Scan `text` for `&<ident>` (optionally followed by `.<field>`) and
-    /// record the FIRST borrow span per identifier into `borrows`. Skips
-    /// strings, char literals and `//` comments the same way `mentionsIdent`
-    /// does so that an `&x` mentioned in a debug message doesn't count as
-    /// a borrow.
-    fn recordBorrows(
+    /// Fire Z0021 once if `name` has at least one live borrow recorded.
+    /// Includes the first live borrow's offset in the message so users can
+    /// jump to the offending `&x`.
+    fn fireBorrowInvalidationIfLive(
+        self: *Sema,
+        borrows: *BorrowMap,
+        name: []const u8,
+        move_span: diag.Span,
+    ) !void {
+        const list = borrows.getPtr(name) orelse return;
+        if (list.items.len == 0) return;
+        try self.diags.emit(
+            .err,
+            .z0021_borrow_invalidated_by_move,
+            move_span,
+            "cannot move '{s}' while borrowed (first borrow at offset {d})",
+            .{ name, list.items[0].span.start },
+        );
+    }
+
+    /// Walk `text` once, simultaneously handling:
+    ///   - string / char / `//` comment skipping
+    ///   - `{` / `}` depth tracking (mutating `*depth`; retiring borrows
+    ///     whose `scope_depth` exceeds the new depth on each block `}`).
+    ///     Struct / array literals (`.{...}`, `Foo{...}`) push a non-scope
+    ///     frame so depth balance is preserved without retiring borrows
+    ///     on their closing brace.
+    ///   - `&ident` borrow recording (appended to `borrows[name]` at the
+    ///     CURRENT depth)
+    ///   - `move ident` sites (firing Z0021 if a live borrow exists, then
+    ///     adding the name to `moved`)
+    ///
+    /// `stmt_span` is the span of the surrounding statement for diagnostic
+    /// emission. `move_span` is the span used for Z0020/Z0021 reports — for
+    /// raw stmts we want the whole stmt span so the squiggle covers the
+    /// `move` site; for own_decl/using inits we pass `null` to suppress
+    /// move scanning (those statement kinds don't carry inline `move`s).
+    fn scanRawText(
         self: *Sema,
         text: []const u8,
-        span: diag.Span,
-        borrows: *std.StringHashMap(diag.Span),
+        stmt_span: diag.Span,
+        move_span: ?diag.Span,
+        borrows: *BorrowMap,
+        moved: *std.StringHashMap(diag.Span),
+        own_names: *std.StringHashMap(void),
+        depth: *u32,
     ) !void {
-        _ = self;
+        // Local stack tagging each open `{` as a lexical scope (true) or
+        // a value literal (false). A scope brace bumps `*depth`; a
+        // literal brace doesn't, so the matching `}` pops without
+        // retiring borrows. We can't use `*depth` alone because struct
+        // literals (`.{ ... }`, `Foo{ ... }`) syntactically use `{` /
+        // `}` but don't open a lexical scope.
+        var brace_stack: std.ArrayList(bool) = .{};
+        defer brace_stack.deinit(self.allocator);
+
         var i: usize = 0;
         while (i < text.len) {
             const c = text[i];
-            // Skip over double-quoted string literals.
+            // Skip over double-quoted string literals so braces / `&x` /
+            // `move x` inside strings don't fool us.
             if (c == '"') {
                 i += 1;
                 while (i < text.len) : (i += 1) {
@@ -390,33 +456,74 @@ pub const Sema = struct {
                 while (i < text.len and text[i] != '\n') i += 1;
                 continue;
             }
+            // Brace depth tracking with kind classification.
+            if (c == '{') {
+                const is_scope = isScopeOpenBrace(text, i);
+                try brace_stack.append(self.allocator, is_scope);
+                if (is_scope) depth.* += 1;
+                i += 1;
+                continue;
+            }
+            if (c == '}') {
+                const is_scope = if (brace_stack.items.len > 0)
+                    brace_stack.pop().?
+                else
+                    true;
+                if (is_scope and depth.* > 0) {
+                    depth.* -= 1;
+                    self.retireBorrowsBelow(borrows, depth.*);
+                }
+                i += 1;
+                continue;
+            }
+            // `move <ident>` — only if move_span is non-null (i.e. caller
+            // wants in-text move scanning).
+            if (move_span) |ms| {
+                if (c == 'm' and i + 4 < text.len and std.mem.startsWith(u8, text[i..], "move")) {
+                    const prev_ok = i == 0 or !isIdent(text[i - 1]);
+                    const after = i + 4;
+                    const sep = if (after < text.len) text[after] else 0;
+                    if (prev_ok and (sep == ' ' or sep == '\t')) {
+                        var j = after + 1;
+                        while (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
+                        const name_start = j;
+                        while (j < text.len and isIdent(text[j])) j += 1;
+                        if (j > name_start) {
+                            const name = text[name_start..j];
+                            try self.fireBorrowInvalidationIfLive(borrows, name, ms);
+                            if (own_names.contains(name)) {
+                                try moved.put(name, ms);
+                            }
+                            i = j;
+                            continue;
+                        }
+                    }
+                }
+            }
+            // `&ident` borrow recording.
             if (c == '&') {
-                // Skip `&&` (short-circuit AND in patterns we may add later
-                // — Zig itself uses `and`, but be defensive).
+                // `&&` is short-circuit AND (defensive — Zig uses `and`).
                 if (i + 1 < text.len and text[i + 1] == '&') { i += 2; continue; }
-                // The `&` must be a prefix on an identifier — i.e. NOT
-                // preceded by an identifier char (which would make it a
-                // bitwise-and like `a & b`).
+                // `&` must not follow an identifier char (that would be
+                // bitwise-and: `a & b`).
                 if (i > 0 and isIdent(text[i - 1])) { i += 1; continue; }
                 var j = i + 1;
-                // Permit a single leading `*` for `&*ptr` (Zig pointer deref
-                // followed by address-of is uncommon but harmless to skip).
                 while (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
                 const name_start = j;
                 while (j < text.len and isIdent(text[j])) j += 1;
                 if (j > name_start) {
                     const name = text[name_start..j];
-                    // Don't record borrows of obvious vtable / type names
-                    // (anything starting with an uppercase letter). The
-                    // heuristic is: lower-case-leading identifiers are
-                    // value bindings; capitalised ones are types/vtables.
-                    // This keeps existing examples (`&Handler_impl_for_X`)
-                    // out of the borrow set.
                     const first = name[0];
                     const is_value_ident = (first >= 'a' and first <= 'z') or first == '_';
                     if (is_value_ident) {
                         const gop = try borrows.getOrPut(name);
-                        if (!gop.found_existing) gop.value_ptr.* = span;
+                        if (!gop.found_existing) {
+                            gop.value_ptr.* = .{};
+                        }
+                        try gop.value_ptr.append(self.allocator, .{
+                            .span = stmt_span,
+                            .scope_depth = depth.*,
+                        });
                     }
                     i = j;
                     continue;
@@ -1133,28 +1240,6 @@ fn collectLocalCalls(
     }
 }
 
-/// Find the next occurrence of `move <ident>` starting at `from`. Returns
-/// the identifier text and the byte offset just past it, or null.
-fn findMoveTarget(text: []const u8, from: usize) ?struct { name: []const u8, end: usize } {
-    var i = from;
-    while (i + 4 < text.len) : (i += 1) {
-        if (!std.mem.startsWith(u8, text[i..], "move")) continue;
-        if (i > 0 and isIdent(text[i - 1])) continue;
-        const after = i + 4;
-        if (after >= text.len) return null;
-        const sep = text[after];
-        if (sep != ' ' and sep != '\t') continue;
-        var j = after + 1;
-        while (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
-        const name_start = j;
-        while (j < text.len and isIdent(text[j])) j += 1;
-        if (j > name_start) {
-            return .{ .name = text[name_start..j], .end = j };
-        }
-    }
-    return null;
-}
-
 fn mentionsIdent(text: []const u8, name: []const u8) bool {
     var i: usize = 0;
     while (i < text.len) {
@@ -1196,6 +1281,51 @@ fn mentionsIdent(text: []const u8, name: []const u8) bool {
 
 fn isIdent(c: u8) bool {
     return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
+}
+
+/// Returns true if the `{` at byte offset `at` opens a lexical scope
+/// (fn body, `if (cond) { ... }`, bare block) and false if it opens a
+/// value literal (`.{ ... }`, `Foo{ ... }`, `[N]u8{ ... }`). The
+/// heuristic walks back over whitespace and inspects the previous
+/// significant byte:
+///
+///   - `.` → `.{` anonymous struct/array literal → literal
+///   - identifier char or `]` or `?` → `Foo{...}`, `[N]u8{...}` →
+///     literal (unless the identifier is a scope-introducing keyword
+///     like `else`, `comptime`, `defer`, ...)
+///   - everything else (`)`, `}`, `;`, `=>`, `,`, start of text, ...)
+///     → scope
+fn isScopeOpenBrace(text: []const u8, at: usize) bool {
+    if (at == 0) return true;
+    var k: usize = at;
+    while (k > 0) {
+        k -= 1;
+        const c = text[k];
+        if (c == ' ' or c == '\t' or c == '\n' or c == '\r') continue;
+        if (c == '.') return false;
+        if (c == ']' or c == '?') return false;
+        if (isIdent(c)) {
+            // Distinguish `Foo{...}` (literal) from `else { ... }` /
+            // `comptime { ... }` / etc. (scope). Walk back to the
+            // start of the identifier and compare against scope-
+            // introducing keywords.
+            const end = k + 1;
+            var t = k;
+            while (t > 0 and isIdent(text[t - 1])) t -= 1;
+            const word = text[t..end];
+            const scope_kws = [_][]const u8{
+                "else", "do", "try", "comptime", "inline", "noinline",
+                "defer", "errdefer", "return", "break", "continue", "and",
+                "or", "test", "blk",
+            };
+            for (scope_kws) |kw| {
+                if (std.mem.eql(u8, word, kw)) return true;
+            }
+            return false;
+        }
+        return true;
+    }
+    return true;
 }
 
 /// Try to extract a constructor type name from an init expression like
