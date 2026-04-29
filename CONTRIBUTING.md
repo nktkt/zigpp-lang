@@ -128,6 +128,46 @@ Add `!` after the prefix or a `BREAKING CHANGE:` footer to signal a
 major bump (e.g. `feat!: drop using` or `feat: ...` plus
 `BREAKING CHANGE: removed using`).
 
+## Multi-tab / multi-agent development
+
+Several Claude Code tabs (or human contributors) can work on this
+repo in parallel. The pattern is **one tab = one git worktree = one
+feature branch = one PR**.
+
+Set up worktrees once:
+
+```sh
+git worktree add ../zigpp-feature-a -b feat/feature-a origin/main
+git worktree add ../zigpp-feature-b -b feat/feature-b origin/main
+```
+
+Each tab opens its worktree directory, edits, runs `zig build all`,
+pushes its branch, and opens a PR. Branch protection prevents direct
+pushes to `main`; release-please cuts the version when the PR merges.
+
+To avoid conflicts, **claim a work area** via the issue tracker:
+
+| Area               | Touches                                       |
+| ------------------ | --------------------------------------------- |
+| `area:compiler`    | `compiler/` (parser, sema, lower, diagnostics) |
+| `area:lib`         | `lib/` (runtime, derive, contracts, async)    |
+| `area:tools`       | `tools/` (CLI, fmt, lsp, doc, migrate)        |
+| `area:vscode`      | `vscode/` extension                           |
+| `area:docs`        | `docs/`, top-level markdown                   |
+| `area:ci`          | `.github/`, workflows                         |
+
+Files touched by two tabs at once (most often `compiler/parser.zig`,
+`compiler/sema.zig`, or `compiler/lower_to_zig.zig`) are the main
+source of merge friction. Coordinate via an issue assignment before
+both tabs start editing.
+
+When done with a worktree:
+
+```sh
+git worktree remove ../zigpp-feature-a
+git branch -d feat/feature-a   # if already merged
+```
+
 ## Releases
 
 Releases are managed by [release-please](https://github.com/googleapis/release-please).
