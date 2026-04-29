@@ -180,7 +180,7 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
 
     if (std.mem.eql(u8, method, "initialize")) {
         const caps =
-            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"referencesProvider":true,"workspaceSymbolProvider":true,"renameProvider":{"prepareProvider":true},"completionProvider":{"triggerCharacters":[".",":"]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false}},"serverInfo":{"name":"zpp-lsp","version":"0.6.0"}}
+            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"referencesProvider":true,"workspaceSymbolProvider":true,"renameProvider":{"prepareProvider":true},"completionProvider":{"triggerCharacters":[".",":"]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false},"codeActionProvider":{"codeActionKinds":["quickfix"]}},"serverInfo":{"name":"zpp-lsp","version":"0.7.0"}}
         ;
         try writeResult(server.allocator, id_text, caps);
         return;
@@ -244,6 +244,10 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
     }
     if (std.mem.eql(u8, method, "textDocument/rename")) {
         try onRename(server, id_text, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/codeAction")) {
+        try onCodeAction(server, id_text, params);
         return;
     }
     if (obj.get("id") != null) {
@@ -1324,6 +1328,208 @@ fn buildRename(
     return out.toOwnedSlice(allocator);
 }
 
+/// One diagnostic that may be turned into a quick-fix CodeAction. Either
+/// sourced from the request's `context.diagnostics` (preferred — VS Code
+/// echoes them back so we can return the exact same object), or synthesised
+/// from the per-uri `HoverDiag` cache for clients (Vim/Emacs/Helix) that
+/// don't include `context.diagnostics`.
+const CodeActionDiag = struct {
+    code: compiler.diagnostics.Code,
+    /// Pre-rendered JSON for the `diagnostics[0]` echo. Owned by caller.
+    /// `null` means "synthesise from cache" — the JSON gets built lazily
+    /// using the cached span + summary text.
+    diag_json: ?[]const u8,
+    /// LSP range (0-indexed) of the diagnostic. Used both for overlap
+    /// testing and for synthesising the diagnostic JSON when none was sent.
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+};
+
+fn onCodeAction(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    const allocator = server.allocator;
+    const p = params orelse return writeResult(allocator, id_text, "[]");
+    if (p != .object) return writeResult(allocator, id_text, "[]");
+    const td = p.object.get("textDocument") orelse return writeResult(allocator, id_text, "[]");
+    if (td != .object) return writeResult(allocator, id_text, "[]");
+    const uri_v = td.object.get("uri") orelse return writeResult(allocator, id_text, "[]");
+    if (uri_v != .string) return writeResult(allocator, id_text, "[]");
+
+    const range_v = p.object.get("range") orelse return writeResult(allocator, id_text, "[]");
+    const range = parseLspRange(range_v) orelse return writeResult(allocator, id_text, "[]");
+
+    const ctx_diags: ?std.json.Value = blk: {
+        const ctx = p.object.get("context") orelse break :blk null;
+        if (ctx != .object) break :blk null;
+        const dv = ctx.object.get("diagnostics") orelse break :blk null;
+        if (dv != .array) break :blk null;
+        break :blk dv;
+    };
+
+    const result = try buildCodeActions(allocator, server, uri_v.string, range, ctx_diags);
+    defer allocator.free(result);
+    try writeResult(allocator, id_text, result);
+}
+
+fn parseLspRange(v: std.json.Value) ?LspRange {
+    if (v != .object) return null;
+    const start = v.object.get("start") orelse return null;
+    const end = v.object.get("end") orelse return null;
+    if (start != .object or end != .object) return null;
+    const sl = start.object.get("line") orelse return null;
+    const sc = start.object.get("character") orelse return null;
+    const el = end.object.get("line") orelse return null;
+    const ec = end.object.get("character") orelse return null;
+    if (sl != .integer or sc != .integer or el != .integer or ec != .integer) return null;
+    if (sl.integer < 0 or sc.integer < 0 or el.integer < 0 or ec.integer < 0) return null;
+    return .{
+        .start_line = @intCast(sl.integer),
+        .start_col = @intCast(sc.integer),
+        .end_line = @intCast(el.integer),
+        .end_col = @intCast(ec.integer),
+    };
+}
+
+/// Two LSP line ranges overlap if neither fully precedes the other.
+fn lineRangesOverlap(
+    a_start: usize,
+    a_end: usize,
+    b_start: usize,
+    b_end: usize,
+) bool {
+    return !(a_end < b_start or b_end < a_start);
+}
+
+/// Build the `result` JSON array (a list of CodeAction objects) for a
+/// textDocument/codeAction request.
+///
+/// Algorithm:
+///   - If `ctx_diags` is non-null, prefer it: walk every entry, skip those
+///     whose `code` field is missing or doesn't match a known Z#### id, and
+///     emit one quick-fix per matching diagnostic. The diagnostic itself is
+///     echoed back verbatim under the action's `diagnostics` field.
+///   - Otherwise, fall back to the cached `HoverDiag` list for `uri` and
+///     synthesise a minimal diagnostic for every cache entry whose line
+///     overlaps `range`.
+///
+/// Each action's `command` invokes `zigpp.explain` with the Z#### id —
+/// VS Code already implements this client-side; other clients can ignore the
+/// command (the title alone surfaces the explanation through hover).
+fn buildCodeActions(
+    allocator: std.mem.Allocator,
+    server: *Server,
+    uri: []const u8,
+    range: LspRange,
+    ctx_diags: ?std.json.Value,
+) ![]u8 {
+    var actions = std.ArrayList(CodeActionDiag){};
+    defer {
+        for (actions.items) |a| {
+            if (a.diag_json) |s| allocator.free(s);
+        }
+        actions.deinit(allocator);
+    }
+
+    if (ctx_diags) |dv| {
+        for (dv.array.items) |d| {
+            if (d != .object) continue;
+            const code_v = d.object.get("code") orelse continue;
+            if (code_v != .string) continue;
+            const code = compiler.diagnostics.codeFromId(code_v.string) orelse continue;
+            const dr = d.object.get("range") orelse continue;
+            const drange = parseLspRange(dr) orelse continue;
+            if (!lineRangesOverlap(range.start_line, range.end_line, drange.start_line, drange.end_line)) continue;
+            const echo = try jsonValueToString(allocator, d);
+            try actions.append(allocator, .{
+                .code = code,
+                .diag_json = echo,
+                .start_line = drange.start_line,
+                .start_col = drange.start_col,
+                .end_line = drange.end_line,
+                .end_col = drange.end_col,
+            });
+        }
+    } else if (server.diags.getPtr(uri)) |list| {
+        for (list.items) |hd| {
+            if (!lineRangesOverlap(range.start_line, range.end_line, hd.line, hd.line)) continue;
+            try actions.append(allocator, .{
+                .code = hd.code,
+                .diag_json = null,
+                .start_line = hd.line,
+                .start_col = hd.col_start,
+                .end_line = hd.line,
+                .end_col = hd.col_end,
+            });
+        }
+    }
+
+    return renderCodeActions(allocator, actions.items);
+}
+
+/// Serialize a `std.json.Value` back to a compact JSON string. Used to echo
+/// a diagnostic verbatim inside a CodeAction's `diagnostics` field.
+fn jsonValueToString(allocator: std.mem.Allocator, v: std.json.Value) ![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, v, .{});
+}
+
+/// Render the JSON array body for a list of CodeActions. Each entry has the
+/// shape:
+///   {
+///     "title": "Explain Z####: <summary>",
+///     "kind":  "quickfix",
+///     "diagnostics": [<echoed diagnostic>],
+///     "command": {
+///       "title": "Explain",
+///       "command": "zigpp.explain",
+///       "arguments": ["Z####"]
+///     }
+///   }
+fn renderCodeActions(allocator: std.mem.Allocator, actions: []const CodeActionDiag) ![]u8 {
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    try out.append(allocator, '[');
+    var first = true;
+    for (actions) |a| {
+        if (!first) try out.append(allocator, ',');
+        first = false;
+
+        const code_id = a.code.id();
+        const summary_text = compiler.diagnostics.summary(a.code);
+        const title = try std.fmt.allocPrint(allocator, "Explain {s}: {s}", .{ code_id, summary_text });
+        defer allocator.free(title);
+        const title_json = try jsonStringify(allocator, title);
+        defer allocator.free(title_json);
+        const code_id_json = try jsonStringify(allocator, code_id);
+        defer allocator.free(code_id_json);
+
+        try out.appendSlice(allocator, "{\"title\":");
+        try out.appendSlice(allocator, title_json);
+        try out.appendSlice(allocator, ",\"kind\":\"quickfix\",\"diagnostics\":[");
+        if (a.diag_json) |echo| {
+            try out.appendSlice(allocator, echo);
+        } else {
+            // Synthesise the minimal diagnostic shape (range + code + a short
+            // message) so non-VS-Code clients can still tie the action back
+            // to something rendered in their own diagnostics list.
+            const msg_json = try jsonStringify(allocator, summary_text);
+            defer allocator.free(msg_json);
+            const synthetic = try std.fmt.allocPrint(
+                allocator,
+                "{{\"range\":{{\"start\":{{\"line\":{d},\"character\":{d}}},\"end\":{{\"line\":{d},\"character\":{d}}}}},\"severity\":1,\"code\":{s},\"message\":{s}}}",
+                .{ a.start_line, a.start_col, a.end_line, a.end_col, code_id_json, msg_json },
+            );
+            defer allocator.free(synthetic);
+            try out.appendSlice(allocator, synthetic);
+        }
+        try out.appendSlice(allocator, "],\"command\":{\"title\":\"Explain\",\"command\":\"zigpp.explain\",\"arguments\":[");
+        try out.appendSlice(allocator, code_id_json);
+        try out.appendSlice(allocator, "]}}");
+    }
+    try out.append(allocator, ']');
+    return out.toOwnedSlice(allocator);
+}
+
 fn onWorkspaceSymbol(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
     var query: []const u8 = "";
     if (params) |p| {
@@ -1883,4 +2089,153 @@ test "buildRename returns null when off a renameable decl" {
     const out = try buildRename(a, src, "file:///x.zpp", 0, 25, "renamed");
     defer a.free(out);
     try std.testing.expectEqualStrings("null", out);
+}
+
+/// Test helper: seed `server.diags` for `uri` with a list of `HoverDiag`.
+/// Mirrors the bookkeeping of `publishDiagnostics` so the test only has to
+/// describe the cache state, not how it gets populated.
+fn seedHoverDiags(server: *Server, uri: []const u8, items: []const HoverDiag) !void {
+    var list: std.ArrayList(HoverDiag) = .{};
+    errdefer list.deinit(server.allocator);
+    for (items) |it| try list.append(server.allocator, it);
+    const key = try server.allocator.dupe(u8, uri);
+    try server.diags.put(key, list);
+}
+
+test "buildCodeActions emits one quickfix per matching cached diag" {
+    const a = std.testing.allocator;
+    var server = Server.init(a);
+    defer server.deinit();
+
+    // Two diagnostics on lines 0 and 5; the request range covers only line 0.
+    try seedHoverDiags(&server, "file:///x.zpp", &.{
+        .{ .line = 0, .col_start = 0, .col_end = 10, .code = .z0010_missing_deinit_on_owned },
+        .{ .line = 5, .col_start = 0, .col_end = 10, .code = .z0001_unknown_trait },
+    });
+
+    const range: LspRange = .{ .start_line = 0, .start_col = 0, .end_line = 0, .end_col = 0 };
+    const out = try buildCodeActions(a, &server, "file:///x.zpp", range, null);
+    defer a.free(out);
+
+    // One CodeAction with the Z0010 title format. Line-5 diag (Z0001) must
+    // not appear because the request range doesn't cross it.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"kind\":\"quickfix\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"title\":\"Explain Z0010:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Z0001") == null);
+    // Command echoes the Z#### id for the client to feed back into
+    // `zigpp.explain`.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"command\":\"zigpp.explain\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"arguments\":[\"Z0010\"]") != null);
+    // Exactly one entry -> exactly one `"kind":"quickfix"`.
+    var count: usize = 0;
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, out, idx, "\"kind\":\"quickfix\"")) |pos| {
+        count += 1;
+        idx = pos + 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
+}
+
+test "buildCodeActions returns [] when range overlaps no cached diag" {
+    const a = std.testing.allocator;
+    var server = Server.init(a);
+    defer server.deinit();
+
+    try seedHoverDiags(&server, "file:///x.zpp", &.{
+        .{ .line = 0, .col_start = 0, .col_end = 10, .code = .z0010_missing_deinit_on_owned },
+    });
+
+    // Request on line 7 — well past the only cached diag on line 0.
+    const range: LspRange = .{ .start_line = 7, .start_col = 0, .end_line = 7, .end_col = 0 };
+    const out = try buildCodeActions(a, &server, "file:///x.zpp", range, null);
+    defer a.free(out);
+    try std.testing.expectEqualStrings("[]", out);
+}
+
+test "buildCodeActions title includes both Z#### and the summary text" {
+    const a = std.testing.allocator;
+    var server = Server.init(a);
+    defer server.deinit();
+
+    try seedHoverDiags(&server, "file:///x.zpp", &.{
+        .{ .line = 0, .col_start = 0, .col_end = 10, .code = .z0010_missing_deinit_on_owned },
+    });
+
+    const range: LspRange = .{ .start_line = 0, .start_col = 0, .end_line = 0, .end_col = 0 };
+    const out = try buildCodeActions(a, &server, "file:///x.zpp", range, null);
+    defer a.free(out);
+
+    // Z#### prefix.
+    try std.testing.expect(std.mem.indexOf(u8, out, "Explain Z0010:") != null);
+    // Summary text from compiler.diagnostics.summary(...) — for Z0010 the
+    // first line of explain() is "Z0010: owned struct missing deinit", so
+    // summary() returns "owned struct missing deinit".
+    const expected_summary = compiler.diagnostics.summary(.z0010_missing_deinit_on_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out, expected_summary) != null);
+}
+
+test "buildCodeActions prefers ctx_diags echo when supplied" {
+    const a = std.testing.allocator;
+    var server = Server.init(a);
+    defer server.deinit();
+    // Cache deliberately empty — when ctx_diags is supplied we must use it
+    // rather than fall back to the cache.
+
+    // Build a fake LSP `context.diagnostics` array containing one Z0010.
+    const fake_params =
+        \\{
+        \\  "diagnostics": [
+        \\    {
+        \\      "range": {
+        \\        "start": {"line": 2, "character": 4},
+        \\        "end":   {"line": 2, "character": 8}
+        \\      },
+        \\      "severity": 1,
+        \\      "code": "Z0010",
+        \\      "message": "owned struct missing deinit",
+        \\      "source": "zpp"
+        \\    }
+        \\  ]
+        \\}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, fake_params, .{});
+    defer parsed.deinit();
+    const ctx_diags = parsed.value.object.get("diagnostics").?;
+
+    const range: LspRange = .{ .start_line = 2, .start_col = 0, .end_line = 2, .end_col = 20 };
+    const out = try buildCodeActions(a, &server, "file:///x.zpp", range, ctx_diags);
+    defer a.free(out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"title\":\"Explain Z0010:") != null);
+    // The echoed diagnostic must include the original `source` field — proof
+    // that we echoed it verbatim rather than synthesised our own object.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"source\":\"zpp\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"arguments\":[\"Z0010\"]") != null);
+}
+
+test "buildCodeActions skips ctx diagnostics with unknown codes" {
+    const a = std.testing.allocator;
+    var server = Server.init(a);
+    defer server.deinit();
+
+    // ZF999 is not a real diagnostic code — should be silently dropped.
+    const fake_params =
+        \\{
+        \\  "diagnostics": [
+        \\    {
+        \\      "range": {"start":{"line":0,"character":0},"end":{"line":0,"character":1}},
+        \\      "code": "ZF999",
+        \\      "message": "bogus"
+        \\    }
+        \\  ]
+        \\}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, fake_params, .{});
+    defer parsed.deinit();
+    const ctx_diags = parsed.value.object.get("diagnostics").?;
+
+    const range: LspRange = .{ .start_line = 0, .start_col = 0, .end_line = 0, .end_col = 1 };
+    const out = try buildCodeActions(a, &server, "file:///x.zpp", range, ctx_diags);
+    defer a.free(out);
+    try std.testing.expectEqualStrings("[]", out);
 }

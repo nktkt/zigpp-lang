@@ -58,8 +58,12 @@ official Zig extension.
   long-form explanation of the diagnostic code plus a link to the docs
   site reference.
 - **Quick Fix code actions**: when the cursor is on a Zig++ diagnostic
-  (e.g. Z0010), VS Code's lightbulb offers `Zig++: Explain Z####` to
-  open the long-form text in the output channel.
+  (e.g. Z0010), the lightbulb offers `Explain Z####: <summary>` to open
+  the long-form text in the output channel. The `zpp-lsp` server now
+  implements `textDocument/codeAction` natively, so the same affordance
+  is available in any LSP client (Vim, Emacs, Helix, Neovim) — not just
+  VS Code. The original client-side provider remains registered as a
+  fallback for diagnostics that pre-date the LSP-driven path.
 - "Explain Diagnostic Code" command (`Cmd/Ctrl+Shift+E`) for direct
   lookup by code.
 - **Status bar item** that displays the detected `zpp` version (or a
@@ -125,12 +129,14 @@ code --install-extension zigpp-0.1.0.vsix
   `textDocument/hover`, `textDocument/documentSymbol` (Outline view), a
   context-free `textDocument/completion` (keywords + top-level decl names),
   same-file `textDocument/definition`, same-file `textDocument/references`,
-  `workspace/symbol` over open documents, and same-file
-  `textDocument/rename` (top-level decl names only). Cross-file
-  go-to-definition, cross-file references, cross-file rename, rename of
-  parameters / locals / method names, workspace search across un-opened
-  files, context-aware completion, and method-on-receiver navigation are
-  not implemented yet.
+  `workspace/symbol` over open documents, same-file
+  `textDocument/rename` (top-level decl names only), and
+  `textDocument/codeAction` (quick-fix `Explain Z####` per diagnostic).
+  Cross-file go-to-definition, cross-file references, cross-file rename,
+  rename of parameters / locals / method names, workspace search across
+  un-opened files, context-aware completion, method-on-receiver
+  navigation, and `WorkspaceEdit`-style auto-fix code actions are not
+  implemented yet.
 - Semantic highlighting falls back to the TextMate grammar — there's no
   semantic-tokens server response yet.
 - The grammar uses a heuristic (PascalCase identifier) for type names. In
