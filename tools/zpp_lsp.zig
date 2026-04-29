@@ -180,7 +180,7 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
 
     if (std.mem.eql(u8, method, "initialize")) {
         const caps =
-            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false}},"serverInfo":{"name":"zpp-lsp","version":"0.1.0"}}
+            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false}},"serverInfo":{"name":"zpp-lsp","version":"0.2.0"}}
         ;
         try writeResult(server.allocator, id_text, caps);
         return;
@@ -216,6 +216,10 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
     }
     if (std.mem.eql(u8, method, "textDocument/hover")) {
         try onHover(server, id_text, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/documentSymbol")) {
+        try onDocumentSymbol(server, id_text, params);
         return;
     }
     if (obj.get("id") != null) {
@@ -443,6 +447,200 @@ fn onFormatting(server: *Server, id_text: []const u8, params: ?std.json.Value) !
     try writeResult(server.allocator, id_text, edit);
 }
 
+/// LSP SymbolKind integers as defined by the spec
+/// (https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#symbolKind).
+/// Only the ones we currently emit are listed here.
+const SymbolKind = enum(u8) {
+    module = 2,
+    class = 5,
+    method = 6,
+    interface = 11,
+    function = 12,
+    @"struct" = 23,
+};
+
+const LspRange = struct {
+    start_line: u32,
+    start_col: u32,
+    end_line: u32,
+    end_col: u32,
+};
+
+fn rangeFromSpan(source: []const u8, span: compiler.diagnostics.Span) LspRange {
+    const start = compiler.locate(source, span.start);
+    const end = compiler.locate(source, span.end);
+    return .{
+        .start_line = start.line - 1,
+        .start_col = if (start.col == 0) 0 else start.col - 1,
+        .end_line = end.line - 1,
+        .end_col = if (end.col == 0) 0 else end.col - 1,
+    };
+}
+
+fn appendRangeJson(out: *std.ArrayList(u8), allocator: std.mem.Allocator, r: LspRange) !void {
+    const buf = try std.fmt.allocPrint(
+        allocator,
+        "{{\"start\":{{\"line\":{d},\"character\":{d}}},\"end\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ r.start_line, r.start_col, r.end_line, r.end_col },
+    );
+    defer allocator.free(buf);
+    try out.appendSlice(allocator, buf);
+}
+
+fn appendSymbol(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    kind: SymbolKind,
+    range: LspRange,
+    children_json: ?[]const u8,
+) !void {
+    const name_json = try jsonStringify(allocator, name);
+    defer allocator.free(name_json);
+
+    try out.appendSlice(allocator, "{\"name\":");
+    try out.appendSlice(allocator, name_json);
+    const head = try std.fmt.allocPrint(allocator, ",\"kind\":{d},\"range\":", .{@intFromEnum(kind)});
+    defer allocator.free(head);
+    try out.appendSlice(allocator, head);
+    try appendRangeJson(out, allocator, range);
+    try out.appendSlice(allocator, ",\"selectionRange\":");
+    try appendRangeJson(out, allocator, range);
+    if (children_json) |c| {
+        try out.appendSlice(allocator, ",\"children\":");
+        try out.appendSlice(allocator, c);
+    }
+    try out.appendSlice(allocator, "}");
+}
+
+fn buildMethodChildren(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    fn_decls: []const compiler.ast.FnDecl,
+) ![]u8 {
+    var arr = std.ArrayList(u8){};
+    defer arr.deinit(allocator);
+    try arr.append(allocator, '[');
+    var first = true;
+    for (fn_decls) |fd| {
+        if (!first) try arr.append(allocator, ',');
+        first = false;
+        try appendSymbol(&arr, allocator, fd.sig.name, .method, rangeFromSpan(source, fd.sig.span), null);
+    }
+    try arr.append(allocator, ']');
+    return arr.toOwnedSlice(allocator);
+}
+
+fn buildTraitMethodChildren(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    methods: []const compiler.ast.TraitMethod,
+) ![]u8 {
+    var arr = std.ArrayList(u8){};
+    defer arr.deinit(allocator);
+    try arr.append(allocator, '[');
+    var first = true;
+    for (methods) |m| {
+        if (!first) try arr.append(allocator, ',');
+        first = false;
+        try appendSymbol(&arr, allocator, m.name, .method, rangeFromSpan(source, m.span), null);
+    }
+    try arr.append(allocator, ']');
+    return arr.toOwnedSlice(allocator);
+}
+
+fn onDocumentSymbol(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    const p = params orelse return writeResult(server.allocator, id_text, "[]");
+    if (p != .object) return writeResult(server.allocator, id_text, "[]");
+    const td = p.object.get("textDocument") orelse return writeResult(server.allocator, id_text, "[]");
+    if (td != .object) return writeResult(server.allocator, id_text, "[]");
+    const uri_v = td.object.get("uri") orelse return writeResult(server.allocator, id_text, "[]");
+    if (uri_v != .string) return writeResult(server.allocator, id_text, "[]");
+
+    const text = server.docs.get(uri_v.string) orelse {
+        try writeResult(server.allocator, id_text, "[]");
+        return;
+    };
+
+    const allocator = server.allocator;
+    const symbols = buildDocumentSymbols(allocator, text) catch {
+        try writeResult(server.allocator, id_text, "[]");
+        return;
+    };
+    defer allocator.free(symbols);
+    try writeResult(server.allocator, id_text, symbols);
+}
+
+/// Build the `result` JSON array (as an owned slice) for a documentSymbol
+/// response over `source`. Returns "[]" on parse failure rather than
+/// erroring — partial syntax mid-edit is the common case in an LSP.
+fn buildDocumentSymbols(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    var diags = compiler.Diagnostics.init(allocator);
+    defer diags.deinit();
+    var arena = compiler.ast.Arena.init(allocator);
+    defer arena.deinit();
+
+    const file = compiler.parseSource(allocator, source, &arena, &diags) catch {
+        return try allocator.dupe(u8, "[]");
+    };
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    try out.append(allocator, '[');
+    var first = true;
+
+    for (file.decls) |decl| {
+        switch (decl) {
+            .fn_decl => |fd| {
+                if (!first) try out.append(allocator, ',');
+                first = false;
+                try appendSymbol(&out, allocator, fd.sig.name, .function, rangeFromSpan(source, decl.span()), null);
+            },
+            .trait => |t| {
+                if (!first) try out.append(allocator, ',');
+                first = false;
+                const children = try buildTraitMethodChildren(allocator, source, t.methods);
+                defer allocator.free(children);
+                try appendSymbol(&out, allocator, t.name, .interface, rangeFromSpan(source, t.span), children);
+            },
+            .impl_block => |ib| {
+                if (!first) try out.append(allocator, ',');
+                first = false;
+                const label = try std.fmt.allocPrint(allocator, "impl {s} for {s}", .{ ib.trait_name, ib.target_type });
+                defer allocator.free(label);
+                const children = try buildMethodChildren(allocator, source, ib.fns);
+                defer allocator.free(children);
+                try appendSymbol(&out, allocator, label, .class, rangeFromSpan(source, ib.span), children);
+            },
+            .owned_struct => |os| {
+                if (!first) try out.append(allocator, ',');
+                first = false;
+                const children = try buildMethodChildren(allocator, source, os.fns);
+                defer allocator.free(children);
+                try appendSymbol(&out, allocator, os.name, .@"struct", rangeFromSpan(source, os.span), children);
+            },
+            .struct_decl => |sd| {
+                if (!first) try out.append(allocator, ',');
+                first = false;
+                const children = try buildMethodChildren(allocator, source, sd.fns);
+                defer allocator.free(children);
+                try appendSymbol(&out, allocator, sd.name, .@"struct", rangeFromSpan(source, sd.span), children);
+            },
+            .extern_interface => |ei| {
+                if (!first) try out.append(allocator, ',');
+                first = false;
+                const children = try buildTraitMethodChildren(allocator, source, ei.methods);
+                defer allocator.free(children);
+                try appendSymbol(&out, allocator, ei.name, .module, rangeFromSpan(source, ei.span), children);
+            },
+            .raw => {}, // No useful symbol for raw Zig blobs.
+        }
+    }
+
+    try out.append(allocator, ']');
+    return out.toOwnedSlice(allocator);
+}
+
 fn countLines(s: []const u8) usize {
     var n: usize = 0;
     for (s) |c| if (c == '\n') {
@@ -497,4 +695,56 @@ test "jsonStringify escapes quotes and backslashes" {
 test "countLines counts newlines + 1" {
     try std.testing.expectEqual(@as(usize, 1), countLines(""));
     try std.testing.expectEqual(@as(usize, 3), countLines("a\nb\nc"));
+}
+
+test "buildDocumentSymbols emits one symbol per top-level decl" {
+    const a = std.testing.allocator;
+    const src =
+        \\trait Writer { fn write(self, bytes: []const u8) !usize; }
+        \\struct Counter {
+        \\    n: usize,
+        \\    pub fn bump(self: *Counter) void { self.n += 1; }
+        \\}
+        \\fn helper(x: usize) usize { return x + 1; }
+    ;
+    const out = try buildDocumentSymbols(a, src);
+    defer a.free(out);
+
+    // Three top-level decls -> three symbols. We don't pin the exact JSON
+    // shape (children/range numbers shift if the parser ever tweaks spans),
+    // we just sanity-check the names + kinds.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"name\":\"Writer\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"kind\":11") != null); // interface
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"name\":\"Counter\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"kind\":23") != null); // struct
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"name\":\"helper\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"kind\":12") != null); // function
+    // Method child of the struct.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"name\":\"bump\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"kind\":6") != null); // method
+}
+
+test "buildDocumentSymbols labels impl blocks and skips raw zig" {
+    const a = std.testing.allocator;
+    const src =
+        \\const std = @import("std");
+        \\trait Writer { fn write(self, bytes: []const u8) !usize; }
+        \\struct FW { n: usize, pub fn write(self: *FW, bytes: []const u8) !usize { _ = self; return bytes.len; } }
+        \\impl Writer for FW { pub fn write(self: *FW, bytes: []const u8) !usize { _ = self; return bytes.len; } }
+    ;
+    const out = try buildDocumentSymbols(a, src);
+    defer a.free(out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"name\":\"impl Writer for FW\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"kind\":5") != null); // class for impl
+    // The leading `const std = @import("std");` falls into RawZig and must
+    // not produce a symbol entry.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"name\":\"std\"") == null);
+}
+
+test "buildDocumentSymbols returns [] on empty source" {
+    const a = std.testing.allocator;
+    const out = try buildDocumentSymbols(a, "");
+    defer a.free(out);
+    try std.testing.expectEqualStrings("[]", out);
 }

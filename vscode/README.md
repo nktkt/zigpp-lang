@@ -20,6 +20,10 @@ official Zig extension.
   on stdio).
 - Document formatting via `textDocument/formatting` (toggle with
   `zigpp.formatter.enable`; works with `editor.formatOnSave`).
+- **Outline view** (`textDocument/documentSymbol`): traits, structs, owned
+  structs, impl blocks, extern interfaces, and top-level functions show up
+  in the VS Code Outline panel and breadcrumbs, with one level of method
+  children for traits/structs/impls.
 - "Run current file" command that shells out to `zpp run` and streams output
   to the Zig++ output channel.
 - "Show lowered Zig" command that opens the result of `zpp lower` in a new
@@ -95,8 +99,10 @@ code --install-extension zigpp-0.1.0.vsix
 ## Known limitations
 
 - The LSP is intentionally MVP. It currently surfaces diagnostics from the
-  `zpp` parser/sema and supports `textDocument/formatting`. Hover, go-to-
-  definition, completion, and rename are not implemented yet.
+  `zpp` parser/sema and supports `textDocument/formatting`,
+  `textDocument/hover`, and `textDocument/documentSymbol` (Outline view).
+  Workspace symbol search, go-to-definition, completion, and rename are not
+  implemented yet.
 - Semantic highlighting falls back to the TextMate grammar — there's no
   semantic-tokens server response yet.
 - The grammar uses a heuristic (PascalCase identifier) for type names. In
