@@ -118,6 +118,21 @@ calls anything that allocates).
 first error after setting the group's `CancellationToken`. Every
 primitive is explicit; there is no implicit await.
 
+## async_results.zpp — typed JoinHandle(T) fan-out / fan-in
+
+```zig
+{{#include ../../examples/async_results.zpp}}
+```
+
+```text
+{{#include ./output/async_results.txt}}
+```
+
+The companion to `async_group.zpp`: each `spawn` returns a typed
+`*JoinHandle(T)` and `handle.join()` blocks only on that single task,
+returning its result. Fan out N tasks, drain them in any order, and
+the result type is checked at compile time.
+
 ## event_bus.zpp — integration showcase
 
 The other 8 examples each demonstrate one feature in isolation.

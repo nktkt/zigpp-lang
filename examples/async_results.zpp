@@ -1,0 +1,53 @@
+/// async_results.zpp — typed `JoinHandle(T)` for fan-out / fan-in.
+///
+/// Teaches: `spawn` returns a *typed* `*JoinHandle(T)`. `handle.join()`
+/// blocks until that single task finishes and returns its result.
+/// Combined with `TaskGroup.join()` you get fan-out (N concurrent
+/// tasks) and fan-in (collect every result) without any executor
+/// abstraction — `JoinHandle(T)` is just a struct that owns its thread.
+///
+/// Lowered Zig sketch:
+///     const h = try group.spawn(square, .{@as(u64, 7)});
+///     const got: u64 = try h.join();   // blocks on this task only
+///     try group.join();                // joins any remaining handles
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+const N: usize = 8;
+
+fn square(x: u64) u64 {
+    return x *% x;
+}
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var group = zpp.async_mod.TaskGroup.init(allocator);
+    defer group.deinit();
+
+    var handles: [N]*zpp.async_mod.JoinHandle(u64) = undefined;
+    var i: u64 = 0;
+    while (i < N) : (i += 1) {
+        handles[i] = try group.spawn(square, .{i});
+    }
+
+    // Fan-in: drain every handle in submission order. Each `join()`
+    // blocks only on its own task; the others continue running on
+    // their threads in parallel until they too are joined.
+    var sum: u64 = 0;
+    var idx: usize = 0;
+    while (idx < N) : (idx += 1) {
+        const got = try handles[idx].join();
+        std.debug.print("square({d}) = {d}\n", .{ idx, got });
+        sum += got;
+    }
+
+    // group.join() is a no-op here because every individual handle
+    // has already been joined; we still call it to keep the contract
+    // visible (and to demonstrate that double-joining is safe).
+    try group.join();
+    std.debug.print("sum = {d}\n", .{sum});
+}

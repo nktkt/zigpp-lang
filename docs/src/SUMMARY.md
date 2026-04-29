@@ -22,6 +22,7 @@
   - [derive_user](./api/derive_user.md)
   - [effects_pure](./api/effects_pure.md)
   - [async_group](./api/async_group.md)
+  - [async_results](./api/async_results.md)
   - [event_bus](./api/event_bus.md)
 
 # Project
