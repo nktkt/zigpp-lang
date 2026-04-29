@@ -197,8 +197,9 @@ pub fn explain(code: Code) []const u8 {
         \\Z0030: function violates declared effect
         \\
         \\You annotated a function with `effects(.noalloc)` / `effects(.noio)`
-        \\(or another restrictive effect) and then called something that
-        \\violates it. Effect annotations are checked by sema as a heuristic:
+        \\/ `effects(.nopanic)` (or another restrictive effect) and then
+        \\called something that violates it. Effect annotations are checked
+        \\by sema as a heuristic:
         \\
         \\  - `.noalloc` checks for `.alloc(` / `.create(` / `.realloc(` /
         \\    `.dupe(` calls in the body (after stripping strings/comments),
@@ -208,6 +209,11 @@ pub fn explain(code: Code) []const u8 {
         \\    `try writer.`, `.writeAll(`, `.writeLine(`, `.print(`, `.read(`,
         \\    `.openFile(`, and `.createFile(` substrings, plus the same
         \\    transitive propagation.
+        \\  - `.nopanic` checks for `@panic(`, `unreachable` (as a
+        \\    statement, not inside an expression chain),
+        \\    `std.debug.assert(`, `std.debug.panic(`, and
+        \\    `std.process.exit(` substrings, plus the same transitive
+        \\    propagation.
         \\
         \\Triggers:
         \\    effects(.noalloc) fn pure(a: Allocator) !void {
@@ -217,10 +223,14 @@ pub fn explain(code: Code) []const u8 {
         \\    effects(.noio) fn quiet() void {
         \\        std.debug.print("hi\n", .{});      // violates .noio
         \\    }
+        \\    effects(.nopanic) fn safe(x: ?u32) u32 {
+        \\        return x orelse @panic("nope");    // violates .nopanic
+        \\    }
         \\
         \\Fix: drop the `effects(.noXXX)` annotation, or eliminate the
         \\offending operation (use a fixed buffer / arena owned by the
-        \\caller for allocs; pass IO out via a writer the caller owns).
+        \\caller for allocs; pass IO out via a writer the caller owns;
+        \\replace panics with explicit error returns).
         ,
         .z0040_impl_missing_method =>
         \\Z0040: impl is missing trait method(s)

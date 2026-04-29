@@ -217,3 +217,33 @@ test "Z0030: noio fn that does IO fires" {
     defer result.diags.deinit();
     try std.testing.expect(hasCode(&result.diags, "Z0030"));
 }
+
+test "Z0030: nopanic annotation matches inference does not fire" {
+    // `helper` is a pure arithmetic fn and `safe` only calls it. Neither
+    // body contains any of the panic heuristic substrings, so inference
+    // agrees with the `.nopanic` annotation and Z0030 must not fire.
+    const a = std.testing.allocator;
+    const src =
+        \\fn helper(x: i32) i32 { return x + 1; }
+        \\effects(.nopanic) fn safe(x: i32) i32 {
+        \\    return helper(x) * 2;
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(!hasCode(&result.diags, "Z0030"));
+}
+
+test "Z0030: nopanic fn that panics fires" {
+    // `boom` declares .nopanic but the body literally contains
+    // `@panic(`, which is in the panic heuristic. Z0030 must fire.
+    const a = std.testing.allocator;
+    const src =
+        \\effects(.nopanic) fn boom() void {
+        \\    @panic("nope");
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(hasCode(&result.diags, "Z0030"));
+}
