@@ -11,6 +11,8 @@ pub const ParamMode = enum {
     impl_trait,
     /// `name: dyn Trait` — lowers to fat pointer + vtable.
     dyn_trait,
+    /// `name: ?dyn Trait` — optional fat pointer; lowers to `?zpp.Dyn(...)`.
+    nullable_dyn_trait,
     /// `name: anytype`.
     any_type,
     /// `comptime name: Type`.

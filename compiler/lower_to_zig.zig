@@ -413,6 +413,7 @@ pub const Lowerer = struct {
             .any_type => try self.writeFmt("{s}: anytype", .{p.name}),
             .impl_trait => try self.writeFmt("{s}: anytype", .{p.name}),
             .dyn_trait => try self.writeFmt("{s}: zpp.Dyn({s}_VTable)", .{ p.name, p.type_text }),
+            .nullable_dyn_trait => try self.writeFmt("{s}: ?zpp.Dyn({s}_VTable)", .{ p.name, p.type_text }),
         }
     }
 
