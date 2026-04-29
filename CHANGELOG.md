@@ -4,6 +4,19 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.11](https://github.com/nktkt/zigpp-lang/compare/v0.1.10...v0.1.11) (2026-04-29)
+
+
+### Features
+
+* LSP hover for diagnostics + downstream consumer demo ([ef8df62](https://github.com/nktkt/zigpp-lang/commit/ef8df62a43e30ce43ae114bdf67e181163938c5d))
+
+
+### CI
+
+* fix examples-consumer step to capture stdout cleanly ([4bd651f](https://github.com/nktkt/zigpp-lang/commit/4bd651f287a9eaf6e3e3b51061d03b5f7b769962))
+* merge stderr in windows consumer step ([36e8cb5](https://github.com/nktkt/zigpp-lang/commit/36e8cb53a08210ec7e8cc09c85f9982112746443))
+
 ## [0.1.10](https://github.com/nktkt/zigpp-lang/compare/v0.1.9...v0.1.10) (2026-04-29)
 
 
