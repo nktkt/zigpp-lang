@@ -25,10 +25,25 @@ const HoverDiag = struct {
 
 const HoverStore = std.StringHashMap(std.ArrayList(HoverDiag));
 
+/// Cached `semanticTokens/full` result so a follow-up `semanticTokens/full/delta`
+/// request can diff against it. `result_id` is a monotonically increasing
+/// counter the client echoes back as `previousResultId`; `data` is the flat
+/// LSP `[deltaLine, deltaStart, length, type, mod]` u32 array we last sent.
+const SemanticTokensResult = struct {
+    result_id: usize,
+    data: []u32,
+};
+
+const SemanticTokensStore = std.StringHashMap(SemanticTokensResult);
+
 const Server = struct {
     allocator: std.mem.Allocator,
     docs: DocStore,
     diags: HoverStore,
+    semantic_tokens: SemanticTokensStore,
+    /// Monotonic counter used to mint a fresh `result_id` per cache write.
+    /// Starts at 1; `0` is reserved as "no previous id".
+    semantic_tokens_next_id: usize = 1,
     initialized: bool = false,
     shutdown_requested: bool = false,
 
@@ -37,6 +52,7 @@ const Server = struct {
             .allocator = allocator,
             .docs = DocStore.init(allocator),
             .diags = HoverStore.init(allocator),
+            .semantic_tokens = SemanticTokensStore.init(allocator),
         };
     }
 
@@ -53,6 +69,12 @@ const Server = struct {
             e.value_ptr.deinit(self.allocator);
         }
         self.diags.deinit();
+        var sit = self.semantic_tokens.iterator();
+        while (sit.next()) |e| {
+            self.allocator.free(e.key_ptr.*);
+            self.allocator.free(e.value_ptr.data);
+        }
+        self.semantic_tokens.deinit();
     }
 };
 
@@ -180,7 +202,7 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
 
     if (std.mem.eql(u8, method, "initialize")) {
         const caps =
-            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"referencesProvider":true,"workspaceSymbolProvider":true,"renameProvider":{"prepareProvider":true},"completionProvider":{"triggerCharacters":[".",":"]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false},"codeActionProvider":{"codeActionKinds":["quickfix"]},"semanticTokensProvider":{"legend":{"tokenTypes":["keyword","string","number","comment","function","interface","struct","variable"],"tokenModifiers":["declaration"]},"full":true}},"serverInfo":{"name":"zpp-lsp","version":"0.8.0"}}
+            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"referencesProvider":true,"workspaceSymbolProvider":true,"renameProvider":{"prepareProvider":true},"completionProvider":{"triggerCharacters":[".",":"]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false},"codeActionProvider":{"codeActionKinds":["quickfix"]},"semanticTokensProvider":{"legend":{"tokenTypes":["keyword","string","number","comment","function","interface","struct","variable"],"tokenModifiers":["declaration"]},"full":{"delta":true},"range":true}},"serverInfo":{"name":"zpp-lsp","version":"0.9.0"}}
         ;
         try writeResult(server.allocator, id_text, caps);
         return;
@@ -252,6 +274,14 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
     }
     if (std.mem.eql(u8, method, "textDocument/semanticTokens/full")) {
         try onSemanticTokensFull(server, id_text, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/semanticTokens/full/delta")) {
+        try onSemanticTokensFullDelta(server, id_text, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/semanticTokens/range")) {
+        try onSemanticTokensRange(server, id_text, params);
         return;
     }
     if (obj.get("id") != null) {
@@ -1580,7 +1610,52 @@ fn onSemanticTokensFull(server: *Server, id_text: []const u8, params: ?std.json.
         return;
     };
 
-    const data = buildSemanticTokens(allocator, text) catch {
+    // Compute the u32 token array, then both (a) cache it for subsequent
+    // `full/delta` requests and (b) stringify it for the response. A scratch
+    // copy of the JSON is freed inline; the cache owns its u32 slice.
+    const u32_data = buildSemanticTokensU32(allocator, text) catch {
+        try writeResult(allocator, id_text, "{\"data\":[]}");
+        return;
+    };
+    const result_id = try cacheSemanticTokens(server, uri_v.string, u32_data);
+
+    const json_data = try u32ArrayToJson(allocator, u32_data);
+    defer allocator.free(json_data);
+
+    const result = try std.fmt.allocPrint(
+        allocator,
+        "{{\"resultId\":\"{d}\",\"data\":{s}}}",
+        .{ result_id, json_data },
+    );
+    defer allocator.free(result);
+    try writeResult(allocator, id_text, result);
+}
+
+/// Handle `textDocument/semanticTokens/range`: tokenise the whole document
+/// (so identifier classification still sees out-of-range top-level decls) but
+/// emit only those tokens whose line falls within `[range.start.line,
+/// range.end.line]`. The first emitted token's `deltaLine` is rebased to be
+/// relative to the start of the document (line 0), exactly like the full
+/// response — VS Code applies the deltas as-is. See LSP 3.17 spec
+/// `textDocument/semanticTokens/range`.
+fn onSemanticTokensRange(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    const allocator = server.allocator;
+    const p = params orelse return writeResult(allocator, id_text, "{\"data\":[]}");
+    if (p != .object) return writeResult(allocator, id_text, "{\"data\":[]}");
+    const td = p.object.get("textDocument") orelse return writeResult(allocator, id_text, "{\"data\":[]}");
+    if (td != .object) return writeResult(allocator, id_text, "{\"data\":[]}");
+    const uri_v = td.object.get("uri") orelse return writeResult(allocator, id_text, "{\"data\":[]}");
+    if (uri_v != .string) return writeResult(allocator, id_text, "{\"data\":[]}");
+
+    const range_v = p.object.get("range") orelse return writeResult(allocator, id_text, "{\"data\":[]}");
+    const range = parseLspRange(range_v) orelse return writeResult(allocator, id_text, "{\"data\":[]}");
+
+    const text = server.docs.get(uri_v.string) orelse {
+        try writeResult(allocator, id_text, "{\"data\":[]}");
+        return;
+    };
+
+    const data = buildSemanticTokensRange(allocator, text, range.start_line, range.end_line) catch {
         try writeResult(allocator, id_text, "{\"data\":[]}");
         return;
     };
@@ -1589,6 +1664,39 @@ fn onSemanticTokensFull(server: *Server, id_text: []const u8, params: ?std.json.
     const result = try std.fmt.allocPrint(allocator, "{{\"data\":{s}}}", .{data});
     defer allocator.free(result);
     try writeResult(allocator, id_text, result);
+}
+
+/// Handle `textDocument/semanticTokens/full/delta`. If the cached `result_id`
+/// matches `previousResultId`, compute new tokens and emit a single
+/// `{start, deleteCount, data}` edit covering the suffix that differs from
+/// the cached array. Otherwise (no cache, mismatched id, parse failure) fall
+/// back to the full `{resultId, data}` response — this is explicitly allowed
+/// by the LSP spec. See LSP 3.17 spec
+/// `textDocument/semanticTokens/full/delta`.
+fn onSemanticTokensFullDelta(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    const allocator = server.allocator;
+    const p = params orelse return writeResult(allocator, id_text, "{\"data\":[]}");
+    if (p != .object) return writeResult(allocator, id_text, "{\"data\":[]}");
+    const td = p.object.get("textDocument") orelse return writeResult(allocator, id_text, "{\"data\":[]}");
+    if (td != .object) return writeResult(allocator, id_text, "{\"data\":[]}");
+    const uri_v = td.object.get("uri") orelse return writeResult(allocator, id_text, "{\"data\":[]}");
+    if (uri_v != .string) return writeResult(allocator, id_text, "{\"data\":[]}");
+
+    const prev_v = p.object.get("previousResultId") orelse return writeResult(allocator, id_text, "{\"data\":[]}");
+    if (prev_v != .string) return writeResult(allocator, id_text, "{\"data\":[]}");
+    const prev_id = std.fmt.parseInt(usize, prev_v.string, 10) catch 0;
+
+    const text = server.docs.get(uri_v.string) orelse {
+        try writeResult(allocator, id_text, "{\"data\":[]}");
+        return;
+    };
+
+    const result_json = buildSemanticTokensDelta(allocator, server, uri_v.string, text, prev_id) catch {
+        try writeResult(allocator, id_text, "{\"data\":[]}");
+        return;
+    };
+    defer allocator.free(result_json);
+    try writeResult(allocator, id_text, result_json);
 }
 
 /// Classify a top-level decl name for semantic-tokens highlighting. We only
@@ -1603,11 +1711,10 @@ fn declTokenType(decl: compiler.ast.TopDecl) ?SemTokType {
     };
 }
 
-/// Build the LSP `data` JSON array (as an owned slice, e.g. `[1,2,3,4,5,...]`)
-/// for a `textDocument/semanticTokens/full` response. Returns `[]` (an empty
-/// array, no tokens) when the document fails to parse — partial syntax mid-
-/// edit is the common case in an LSP, and we'd rather drop highlighting than
-/// drop the connection.
+/// Step 1+2 of the semantic-tokens pipeline: collect absolute (line, char,
+/// length, type, mod) tuples in source order. Caller owns the returned slice.
+/// Returns an empty slice when the lexer fails — we'd rather drop highlighting
+/// than drop the LSP connection mid-edit.
 ///
 /// Algorithm:
 ///  1. Build a name -> token-type map from the parsed top-level decls so each
@@ -1623,10 +1730,7 @@ fn declTokenType(decl: compiler.ast.TopDecl) ?SemTokType {
 ///       - skipped otherwise
 ///     Identifiers immediately following `fn`, `trait`, `struct`, `owned`, or
 ///     `extern interface` are flagged with the `declaration` modifier.
-///  3. Encode the absolute token list as LSP-relative `(deltaLine, deltaStart,
-///     length, type, mod)` quintuples and stringify the resulting `u32` flat
-///     array.
-fn buildSemanticTokens(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+fn collectSemanticTokens(allocator: std.mem.Allocator, source: []const u8) ![]AbsToken {
     // Step 1: classify top-level decl names. The map borrows identifier slices
     // straight from `source` — same lifetime as the caller-owned text.
     var name_kind = std.StringHashMap(SemTokType).init(allocator);
@@ -1658,7 +1762,7 @@ fn buildSemanticTokens(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
     defer lex_diags.deinit();
     var lx = compiler.token.Lexer.init(source, &lex_diags);
     var toks = lx.tokenizeAll(allocator) catch {
-        return allocator.dupe(u8, "[]");
+        return allocator.alloc(AbsToken, 0);
     };
     defer toks.deinit(allocator);
 
@@ -1750,30 +1854,199 @@ fn buildSemanticTokens(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
         }
     }
 
-    // Step 3: encode as LSP-relative quintuples and stringify.
-    var out = std.ArrayList(u8){};
-    defer out.deinit(allocator);
-    try out.append(allocator, '[');
+    return abs.toOwnedSlice(allocator);
+}
+
+/// Step 3 of the semantic-tokens pipeline: encode an absolute-token slice as
+/// LSP-relative `(deltaLine, deltaStart, length, type, mod)` quintuples in a
+/// flat `u32` slice. Caller owns the returned slice. Deltas are computed
+/// against the start of the document (line 0, column 0) — the same baseline
+/// the LSP spec uses for the first token of either `full` or `range` results.
+fn encodeSemanticTokensU32(
+    allocator: std.mem.Allocator,
+    abs: []const AbsToken,
+) ![]u32 {
+    var out = try allocator.alloc(u32, abs.len * 5);
+    errdefer allocator.free(out);
     var prev_line: u32 = 0;
     var prev_char: u32 = 0;
-    var first = true;
-    for (abs.items) |a| {
+    for (abs, 0..) |a, i| {
         const delta_line = a.line - prev_line;
         const delta_start = if (delta_line == 0) a.char - prev_char else a.char;
-        if (!first) try out.append(allocator, ',');
-        first = false;
-        const buf = try std.fmt.allocPrint(
-            allocator,
-            "{d},{d},{d},{d},{d}",
-            .{ delta_line, delta_start, a.length, a.token_type, a.token_mod },
-        );
-        defer allocator.free(buf);
-        try out.appendSlice(allocator, buf);
+        out[i * 5 + 0] = delta_line;
+        out[i * 5 + 1] = delta_start;
+        out[i * 5 + 2] = a.length;
+        out[i * 5 + 3] = a.token_type;
+        out[i * 5 + 4] = a.token_mod;
         prev_line = a.line;
         prev_char = a.char;
     }
+    return out;
+}
+
+/// Stringify a flat `u32` semantic-tokens array as the JSON literal LSP
+/// expects (e.g. `[1,2,3,4,5,...]`). Caller owns the returned slice.
+fn u32ArrayToJson(allocator: std.mem.Allocator, data: []const u32) ![]u8 {
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    try out.append(allocator, '[');
+    for (data, 0..) |v, i| {
+        if (i != 0) try out.append(allocator, ',');
+        const buf = try std.fmt.allocPrint(allocator, "{d}", .{v});
+        defer allocator.free(buf);
+        try out.appendSlice(allocator, buf);
+    }
     try out.append(allocator, ']');
     return out.toOwnedSlice(allocator);
+}
+
+/// Build the LSP `data` JSON array (as an owned slice, e.g. `[1,2,3,4,5,...]`)
+/// for a `textDocument/semanticTokens/full` response. Returns `[]` when
+/// allocation of the absolute-token list fails — partial syntax mid-edit is
+/// the common case in an LSP, and we'd rather drop highlighting than drop the
+/// connection.
+fn buildSemanticTokens(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    const data = try buildSemanticTokensU32(allocator, source);
+    defer allocator.free(data);
+    return u32ArrayToJson(allocator, data);
+}
+
+/// Same as `buildSemanticTokens` but returns the flat `u32` array directly,
+/// which is what the cache + delta path needs. Caller owns the returned slice.
+fn buildSemanticTokensU32(allocator: std.mem.Allocator, source: []const u8) ![]u32 {
+    const abs = try collectSemanticTokens(allocator, source);
+    defer allocator.free(abs);
+    return encodeSemanticTokensU32(allocator, abs);
+}
+
+/// Build the LSP `data` JSON array for a `textDocument/semanticTokens/range`
+/// response. Tokenises the entire `source` (so identifier classification still
+/// sees out-of-range top-level decls), then keeps only the tuples whose line
+/// is in `[start_line, end_line]` and re-encodes them with deltas relative to
+/// the start of the document. Returns `[]` when the filtered set is empty.
+fn buildSemanticTokensRange(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    start_line: u32,
+    end_line: u32,
+) ![]u8 {
+    const abs = try collectSemanticTokens(allocator, source);
+    defer allocator.free(abs);
+
+    // Filter in place into a fresh buffer; preserves source order (the
+    // collector already emits tokens in lexical order, so a single linear
+    // sweep is enough).
+    var filtered = std.ArrayList(AbsToken){};
+    defer filtered.deinit(allocator);
+    for (abs) |t| {
+        if (t.line < start_line) continue;
+        if (t.line > end_line) continue;
+        try filtered.append(allocator, t);
+    }
+
+    const u32_data = try encodeSemanticTokensU32(allocator, filtered.items);
+    defer allocator.free(u32_data);
+    return u32ArrayToJson(allocator, u32_data);
+}
+
+/// Insert / refresh the cached u32 semantic-tokens array for `uri` and return
+/// the new `result_id`. Frees the previous cache entry's `data` slice. The
+/// cache takes ownership of `new_data` (caller must NOT free it on success).
+fn cacheSemanticTokens(server: *Server, uri: []const u8, new_data: []u32) !usize {
+    const id = server.semantic_tokens_next_id;
+    server.semantic_tokens_next_id += 1;
+    if (server.semantic_tokens.fetchRemove(uri)) |kv| {
+        server.allocator.free(kv.key);
+        server.allocator.free(kv.value.data);
+    }
+    const key = try server.allocator.dupe(u8, uri);
+    try server.semantic_tokens.put(key, .{ .result_id = id, .data = new_data });
+    return id;
+}
+
+/// Build the JSON response body for `textDocument/semanticTokens/full/delta`.
+///
+/// If the cached result_id matches `prev_id`, returns
+/// `{"resultId":"<id>","edits":[<single edit>]}` where the edit is a single
+/// `{start, deleteCount, data}` covering the suffix that differs from the
+/// cached array (longest common prefix / suffix trim). The LSP spec
+/// explicitly allows a single broad edit instead of per-token diffs.
+///
+/// Otherwise — no cache, mismatched id, parse failure — returns the full
+/// `{"resultId":"<id>","data":[...]}` shape, which the spec lists as a valid
+/// fallback. Always refreshes the cache with the freshly computed tokens.
+fn buildSemanticTokensDelta(
+    allocator: std.mem.Allocator,
+    server: *Server,
+    uri: []const u8,
+    source: []const u8,
+    prev_id: usize,
+) ![]u8 {
+    const new_data = try buildSemanticTokensU32(allocator, source);
+    // We need a stable view of the OLD data (the LCP/LCS scan) before the
+    // cache write blows it away. Snapshot the pointer + length first; the
+    // cache write below frees the old slice, so we must finish all reads of
+    // `old` before that point.
+    var old_copy: ?[]u32 = null;
+    defer if (old_copy) |o| allocator.free(o);
+
+    if (server.semantic_tokens.get(uri)) |cached| {
+        if (cached.result_id == prev_id) {
+            const dup = try allocator.alloc(u32, cached.data.len);
+            @memcpy(dup, cached.data);
+            old_copy = dup;
+        }
+    }
+
+    if (old_copy == null) {
+        // Full fallback (no cache or mismatched id). Refresh the cache and
+        // emit the full `{resultId, data}` shape.
+        const json_data = try u32ArrayToJson(allocator, new_data);
+        defer allocator.free(json_data);
+        const new_id = try cacheSemanticTokens(server, uri, new_data);
+        return std.fmt.allocPrint(
+            allocator,
+            "{{\"resultId\":\"{d}\",\"data\":{s}}}",
+            .{ new_id, json_data },
+        );
+    }
+
+    // Single-range diff: longest common prefix + longest common suffix.
+    const old = old_copy.?;
+    var prefix: usize = 0;
+    const min_len = @min(old.len, new_data.len);
+    while (prefix < min_len and old[prefix] == new_data[prefix]) : (prefix += 1) {}
+
+    var suffix: usize = 0;
+    while (suffix < (min_len - prefix) and
+        old[old.len - 1 - suffix] == new_data[new_data.len - 1 - suffix]) : (suffix += 1)
+    {}
+
+    const delete_count = old.len - prefix - suffix;
+    const insert = new_data[prefix .. new_data.len - suffix];
+
+    // Pre-stringify the edit body BEFORE the cache write so we don't need to
+    // hold any references to `new_data` across `cacheSemanticTokens` (which
+    // takes ownership).
+    const body = if (delete_count == 0 and insert.len == 0)
+        try allocator.dupe(u8, "[]")
+    else blk: {
+        const insert_json = try u32ArrayToJson(allocator, insert);
+        defer allocator.free(insert_json);
+        break :blk try std.fmt.allocPrint(
+            allocator,
+            "[{{\"start\":{d},\"deleteCount\":{d},\"data\":{s}}}]",
+            .{ prefix, delete_count, insert_json },
+        );
+    };
+    defer allocator.free(body);
+
+    const new_id = try cacheSemanticTokens(server, uri, new_data);
+    return std.fmt.allocPrint(
+        allocator,
+        "{{\"resultId\":\"{d}\",\"edits\":{s}}}",
+        .{ new_id, body },
+    );
 }
 
 fn onWorkspaceSymbol(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
