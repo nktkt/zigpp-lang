@@ -47,7 +47,7 @@ const type_pool_basic = [_][]const u8{
     "?i32", "[]i32", "*i32", "*const u8", "anyerror!void", "[*]u8",
 };
 
-const effect_pool = [_][]const u8{ "alloc", "noalloc", "io", "panic", "custom" };
+const effect_pool = [_][]const u8{ "alloc", "noalloc", "io", "noio", "panic", "custom" };
 const derive_pool = [_][]const u8{ "Hash", "Eq", "Debug", "Json", "Clone" };
 
 fn pickIdent(rng: *Random) []const u8 {

@@ -196,20 +196,31 @@ pub fn explain(code: Code) []const u8 {
         .z0030_effect_violation =>
         \\Z0030: function violates declared effect
         \\
-        \\You annotated a function with `effects(.noalloc)` (or another
-        \\restrictive effect) and then called something that violates it.
-        \\Effect annotations are checked by sema as a heuristic — identifiers
-        \\containing `Allocator`, `alloc`, `create`, etc. count as an
-        \\allocation site.
+        \\You annotated a function with `effects(.noalloc)` / `effects(.noio)`
+        \\(or another restrictive effect) and then called something that
+        \\violates it. Effect annotations are checked by sema as a heuristic:
+        \\
+        \\  - `.noalloc` checks for `.alloc(` / `.create(` / `.realloc(` /
+        \\    `.dupe(` calls in the body (after stripping strings/comments),
+        \\    plus transitive propagation via local same-file callees.
+        \\  - `.noio` checks for the `std.debug.print`, `std.fs.`, `std.io.`,
+        \\    `std.process.`, `std.net.`, `std.os.`, `std.posix.`,
+        \\    `try writer.`, `.writeAll(`, `.writeLine(`, `.print(`, `.read(`,
+        \\    `.openFile(`, and `.createFile(` substrings, plus the same
+        \\    transitive propagation.
         \\
         \\Triggers:
         \\    effects(.noalloc) fn pure(a: Allocator) !void {
         \\        const xs = try a.alloc(u8, 16);   // violates .noalloc
         \\        _ = xs;
         \\    }
+        \\    effects(.noio) fn quiet() void {
+        \\        std.debug.print("hi\n", .{});      // violates .noio
+        \\    }
         \\
-        \\Fix: drop the `effects(.noalloc)` annotation, or eliminate the
-        \\allocation (use a fixed buffer / arena owned by the caller).
+        \\Fix: drop the `effects(.noXXX)` annotation, or eliminate the
+        \\offending operation (use a fixed buffer / arena owned by the
+        \\caller for allocs; pass IO out via a writer the caller owns).
         ,
         .z0040_impl_missing_method =>
         \\Z0040: impl is missing trait method(s)
