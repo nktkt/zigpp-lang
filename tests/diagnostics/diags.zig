@@ -347,3 +347,51 @@ test "Z0050: @effectsOf of an unknown fn fires and lowers to empty" {
     try std.testing.expect(std.mem.indexOf(u8, out, "return \"\";") != null);
     try std.testing.expect(hasCode(&diags, "Z0050"));
 }
+
+// --- Z0060 .custom("name") effect inference (round 5) ---
+
+test "Z0060: nocustom matches declared custom does not fire" {
+    // `caller` declares effects(.custom("net")) and calls `worker` which
+    // also declares effects(.custom("net")). Inference agrees with the
+    // declaration; no Z0060.
+    const a = std.testing.allocator;
+    const src =
+        \\effects(.custom("net")) fn worker() void {}
+        \\effects(.custom("net")) fn caller() void { worker(); }
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(!hasCode(&result.diags, "Z0060"));
+}
+
+test "Z0060: nocustom violated by transitive custom callee fires" {
+    // `caller` declares .nocustom("net") but calls `worker` which declares
+    // .custom("net"). Inference propagates .custom("net") up to caller,
+    // contradicting the .nocustom annotation, so Z0060 must fire on caller.
+    const a = std.testing.allocator;
+    const src =
+        \\effects(.custom("net")) fn worker() void {}
+        \\effects(.nocustom("net")) fn caller() void { worker(); }
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(hasCode(&result.diags, "Z0060"));
+}
+
+test "Z0050: @effectsOf still resolves a custom-effect-only fn (lowering MVP omits the name)" {
+    // Lowering for @effectsOf currently only emits the alloc/io/panic axes
+    // (round 4 shape). A fn whose only effect is `.custom("net")` therefore
+    // lowers to "" — no Z0050 — and emitting custom names through @effectsOf
+    // is left as a follow-up.
+    const a = std.testing.allocator;
+    var diags = compiler.Diagnostics.init(a);
+    defer diags.deinit();
+    const src =
+        \\effects(.custom("net")) fn worker() void {}
+        \\fn ask() []const u8 { return @effectsOf(worker); }
+    ;
+    const out = try compiler.compileToZig(a, src, &diags);
+    defer a.free(out);
+    try std.testing.expect(!hasCode(&diags, "Z0050"));
+    try std.testing.expect(std.mem.indexOf(u8, out, "return \"\";") != null);
+}

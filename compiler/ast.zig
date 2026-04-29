@@ -40,12 +40,17 @@ pub const WhereClause = struct {
     span: diag.Span,
 };
 
-pub const EffectKind = enum { alloc, noalloc, io, noio, panic, nopanic, custom };
+pub const EffectKind = enum { alloc, noalloc, io, noio, panic, nopanic, custom, nocustom };
 
 pub const Effect = struct {
     kind: EffectKind,
-    /// For .custom, the raw token text (without leading dot).
+    /// For .custom / .nocustom, the keyword token text without leading dot
+    /// ("custom" or "nocustom"). For other kinds, the keyword text matching
+    /// `kind` (e.g. "noalloc"). Useful for diagnostic messages.
     text: StringSlice,
+    /// For .custom("X") / .nocustom("X"), the raw user name "X" (without
+    /// surrounding quotes). Empty slice for the bare-keyword variants.
+    name: StringSlice = "",
 };
 
 pub const EffectsAttr = struct {
