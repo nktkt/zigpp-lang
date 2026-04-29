@@ -202,7 +202,7 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
 
     if (std.mem.eql(u8, method, "initialize")) {
         const caps =
-            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"referencesProvider":true,"workspaceSymbolProvider":true,"renameProvider":{"prepareProvider":true},"completionProvider":{"triggerCharacters":[".",":"]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false},"codeActionProvider":{"codeActionKinds":["quickfix"]},"semanticTokensProvider":{"legend":{"tokenTypes":["keyword","string","number","comment","function","interface","struct","variable"],"tokenModifiers":["declaration"]},"full":{"delta":true},"range":true}},"serverInfo":{"name":"zpp-lsp","version":"0.9.0"}}
+            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"referencesProvider":true,"workspaceSymbolProvider":true,"renameProvider":{"prepareProvider":true},"completionProvider":{"triggerCharacters":[".",":"]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false},"codeActionProvider":{"codeActionKinds":["quickfix"]},"semanticTokensProvider":{"legend":{"tokenTypes":["keyword","string","number","comment","function","interface","struct","variable"],"tokenModifiers":["declaration"]},"full":{"delta":true},"range":true}},"serverInfo":{"name":"zpp-lsp","version":"0.10.0"}}
         ;
         try writeResult(server.allocator, id_text, caps);
         return;
@@ -1379,6 +1379,24 @@ const CodeActionDiag = struct {
     start_col: usize,
     end_line: usize,
     end_col: usize,
+    /// Optional `WorkspaceEdit`-style auto-fix attached to this diagnostic.
+    /// When non-null, `renderCodeActions` emits a SECOND quick-fix entry
+    /// (after the "Explain" one) that ships the edit. Both `title` and
+    /// `insert_text` are owned by the caller.
+    auto_fix: ?AutoFixEdit = null,
+};
+
+/// A single-file, single-edit `WorkspaceEdit`. We deliberately keep the
+/// shape minimal — start == end (a pure insertion) at (line, col) of the
+/// target document's `uri`. Extending to multi-edit fixes only requires
+/// turning `insert_text` + `line` + `col` into a `[]TextEdit`; the renderer
+/// already emits the surrounding `WorkspaceEdit` envelope.
+const AutoFixEdit = struct {
+    title: []const u8,
+    uri: []const u8,
+    line: u32,
+    col: u32,
+    insert_text: []const u8,
 };
 
 fn onCodeAction(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
@@ -1447,9 +1465,13 @@ fn lineRangesOverlap(
 ///     synthesise a minimal diagnostic for every cache entry whose line
 ///     overlaps `range`.
 ///
-/// Each action's `command` invokes `zigpp.explain` with the Z#### id —
-/// VS Code already implements this client-side; other clients can ignore the
-/// command (the title alone surfaces the explanation through hover).
+/// For each diag we always emit an "Explain Z####" action whose `command`
+/// invokes `zigpp.explain` (VS Code implements it client-side; other
+/// clients can ignore the command). For Z0010 and Z0040 we ALSO attach a
+/// `WorkspaceEdit`-based auto-fix when the cached document text + parser
+/// give us enough structure to compute a safe insertion (a `pub fn deinit`
+/// stub, or one stub per missing trait method). The auto-fix is rendered
+/// as a second quick-fix entry after the explain action.
 fn buildCodeActions(
     allocator: std.mem.Allocator,
     server: *Server,
@@ -1461,6 +1483,10 @@ fn buildCodeActions(
     defer {
         for (actions.items) |a| {
             if (a.diag_json) |s| allocator.free(s);
+            if (a.auto_fix) |fx| {
+                allocator.free(fx.title);
+                allocator.free(fx.insert_text);
+            }
         }
         actions.deinit(allocator);
     }
@@ -1498,7 +1524,194 @@ fn buildCodeActions(
         }
     }
 
+    // Second pass: try to attach an auto-fix to each Z0010 / Z0040 entry.
+    // We need the cached document text to parse into an AST; if there's no
+    // cached doc (test fixtures, race with didClose, etc.) just skip — the
+    // caller still gets the explain action.
+    if (server.docs.get(uri)) |source| {
+        for (actions.items) |*a| {
+            a.auto_fix = computeAutoFix(allocator, a.code, source, uri, a.start_line) catch null;
+        }
+    }
+
     return renderCodeActions(allocator, actions.items);
+}
+
+/// Compute a `WorkspaceEdit`-style auto-fix for the given diagnostic, or
+/// return `null` when no safe fix is available (unsupported code, parser
+/// can't recover the relevant decl, trait not in scope, …).
+///
+/// Caller owns `result.title` and `result.insert_text`; the LSP-level
+/// cleanup happens in the `defer` inside `buildCodeActions`.
+fn computeAutoFix(
+    allocator: std.mem.Allocator,
+    code: compiler.diagnostics.Code,
+    source: []const u8,
+    uri: []const u8,
+    diag_line: usize,
+) !?AutoFixEdit {
+    return switch (code) {
+        .z0010_missing_deinit_on_owned => try buildZ0010AutoFix(allocator, source, uri, diag_line),
+        .z0040_impl_missing_method => try buildZ0040AutoFix(allocator, source, uri, diag_line),
+        else => null,
+    };
+}
+
+/// Z0010: locate the `owned struct` whose decl span overlaps the diag line
+/// and emit a `pub fn deinit(self: *@This()) void { _ = self; }` stub
+/// inserted just before the struct's closing `}`.
+///
+/// The fix is intentionally minimal: we don't try to deinit fields, walk
+/// allocator references, etc. Compiles but leaves the body to the user.
+fn buildZ0010AutoFix(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    uri: []const u8,
+    diag_line: usize,
+) !?AutoFixEdit {
+    var diags = compiler.Diagnostics.init(allocator);
+    defer diags.deinit();
+    var arena = compiler.ast.Arena.init(allocator);
+    defer arena.deinit();
+    const file = compiler.parseSource(allocator, source, &arena, &diags) catch return null;
+
+    for (file.decls) |decl| {
+        const os = switch (decl) {
+            .owned_struct => |o| o,
+            else => continue,
+        };
+        const r = rangeFromSpan(source, os.span);
+        if (r.start_line > diag_line or r.end_line < diag_line) continue;
+        // Skip if the user already wrote a `deinit` (defensive — sema
+        // shouldn't fire Z0010 in that case, but a stale parse could).
+        for (os.fns) |fd| {
+            if (std.mem.eql(u8, fd.sig.name, "deinit")) return null;
+        }
+        const insert = try allocator.dupe(
+            u8,
+            "\n    pub fn deinit(self: *@This()) void {\n        _ = self;\n    }\n",
+        );
+        errdefer allocator.free(insert);
+        const close_pos = brace_pos: {
+            // span.end is just past the `}`; the byte at end-1 is the `}`.
+            const off: u32 = if (os.span.end == 0) 0 else os.span.end - 1;
+            const lc = compiler.locate(source, off);
+            break :brace_pos .{
+                .line = lc.line - 1,
+                .col = if (lc.col == 0) 0 else lc.col - 1,
+            };
+        };
+        const title = try allocator.dupe(
+            u8,
+            "Auto-fix: add `pub fn deinit(self: *@This()) void` stub",
+        );
+        return .{
+            .title = title,
+            .uri = uri,
+            .line = close_pos.line,
+            .col = close_pos.col,
+            .insert_text = insert,
+        };
+    }
+    return null;
+}
+
+/// Z0040: locate the `impl Trait for Target` block whose span overlaps the
+/// diag line, look up `Trait` in the same file, and emit a `pub fn <name>(...)
+/// void { unreachable; }` stub for every trait method missing from the impl.
+///
+/// We deliberately ignore the trait method's parameter list and return type
+/// — copying them verbatim would require re-rendering Param slices, and a
+/// `void { unreachable; }` stub is safe + compilable for the user to flesh
+/// out. Trait methods present in the impl are skipped; if NONE are missing
+/// we return `null` (no fix needed).
+fn buildZ0040AutoFix(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    uri: []const u8,
+    diag_line: usize,
+) !?AutoFixEdit {
+    var diags = compiler.Diagnostics.init(allocator);
+    defer diags.deinit();
+    var arena = compiler.ast.Arena.init(allocator);
+    defer arena.deinit();
+    const file = compiler.parseSource(allocator, source, &arena, &diags) catch return null;
+
+    // Locate the impl block whose span covers the diag line.
+    var impl: ?compiler.ast.ImplBlock = null;
+    for (file.decls) |decl| {
+        const ib = switch (decl) {
+            .impl_block => |i| i,
+            else => continue,
+        };
+        const r = rangeFromSpan(source, ib.span);
+        if (r.start_line <= diag_line and r.end_line >= diag_line) {
+            impl = ib;
+            break;
+        }
+    }
+    const ib = impl orelse return null;
+
+    // Locate the trait by name in the same file. If the trait isn't there
+    // we can't compute the diff — bail out (the user may need Z0001 first).
+    var trait: ?compiler.ast.TraitDecl = null;
+    for (file.decls) |decl| {
+        switch (decl) {
+            .trait => |t| if (std.mem.eql(u8, t.name, ib.trait_name)) {
+                trait = t;
+                break;
+            },
+            else => {},
+        }
+    }
+    const tr = trait orelse return null;
+
+    // Build the body of the WorkspaceEdit insertion: one stub per missing
+    // method. Each stub is indented to match the impl block's typical
+    // 4-space style and prefixed with a leading newline so it lands cleanly
+    // after the last existing fn.
+    var body = std.ArrayList(u8){};
+    defer body.deinit(allocator);
+    var any_missing = false;
+    for (tr.methods) |m| {
+        var found = false;
+        for (ib.fns) |fd| {
+            if (std.mem.eql(u8, fd.sig.name, m.name)) {
+                found = true;
+                break;
+            }
+        }
+        if (found) continue;
+        any_missing = true;
+        const stub = try std.fmt.allocPrint(
+            allocator,
+            "\n    pub fn {s}(self: *@This()) void {{\n        _ = self;\n        unreachable;\n    }}\n",
+            .{m.name},
+        );
+        defer allocator.free(stub);
+        try body.appendSlice(allocator, stub);
+    }
+    if (!any_missing) return null;
+
+    const insert = try body.toOwnedSlice(allocator);
+    errdefer allocator.free(insert);
+
+    const close_pos = brace_pos: {
+        const off: u32 = if (ib.span.end == 0) 0 else ib.span.end - 1;
+        const lc = compiler.locate(source, off);
+        break :brace_pos .{
+            .line = lc.line - 1,
+            .col = if (lc.col == 0) 0 else lc.col - 1,
+        };
+    };
+    const title = try allocator.dupe(u8, "Auto-fix: stub missing trait method(s)");
+    return .{
+        .title = title,
+        .uri = uri,
+        .line = close_pos.line,
+        .col = close_pos.col,
+        .insert_text = insert,
+    };
 }
 
 /// Serialize a `std.json.Value` back to a compact JSON string. Used to echo
@@ -1507,45 +1720,54 @@ fn jsonValueToString(allocator: std.mem.Allocator, v: std.json.Value) ![]u8 {
     return std.json.Stringify.valueAlloc(allocator, v, .{});
 }
 
-/// Render the JSON array body for a list of CodeActions. Each entry has the
-/// shape:
-///   {
-///     "title": "Explain Z####: <summary>",
-///     "kind":  "quickfix",
-///     "diagnostics": [<echoed diagnostic>],
-///     "command": {
-///       "title": "Explain",
-///       "command": "zigpp.explain",
-///       "arguments": ["Z####"]
-///     }
-///   }
+/// Render the JSON array body for a list of CodeActions. For each
+/// `CodeActionDiag` we emit:
+///
+///   1. An "Explain" entry whose `command` invokes `zigpp.explain`:
+///        {
+///          "title": "Explain Z####: <summary>",
+///          "kind":  "quickfix",
+///          "diagnostics": [<echoed diagnostic>],
+///          "command": {
+///            "title": "Explain",
+///            "command": "zigpp.explain",
+///            "arguments": ["Z####"]
+///          }
+///        }
+///
+///   2. (Optional, when `a.auto_fix != null`) an "Auto-fix" entry with a
+///      `WorkspaceEdit` instead of a `command`:
+///        {
+///          "title": "<auto_fix.title>",
+///          "kind":  "quickfix",
+///          "diagnostics": [<echoed diagnostic>],
+///          "edit": {
+///            "changes": {
+///              "<uri>": [
+///                { "range": { "start": {...}, "end": {...} },
+///                  "newText": "..." }
+///              ]
+///            }
+///          }
+///        }
 fn renderCodeActions(allocator: std.mem.Allocator, actions: []const CodeActionDiag) ![]u8 {
     var out = std.ArrayList(u8){};
     defer out.deinit(allocator);
     try out.append(allocator, '[');
     var first = true;
     for (actions) |a| {
-        if (!first) try out.append(allocator, ',');
-        first = false;
-
         const code_id = a.code.id();
         const summary_text = compiler.diagnostics.summary(a.code);
-        const title = try std.fmt.allocPrint(allocator, "Explain {s}: {s}", .{ code_id, summary_text });
-        defer allocator.free(title);
-        const title_json = try jsonStringify(allocator, title);
-        defer allocator.free(title_json);
         const code_id_json = try jsonStringify(allocator, code_id);
         defer allocator.free(code_id_json);
 
-        try out.appendSlice(allocator, "{\"title\":");
-        try out.appendSlice(allocator, title_json);
-        try out.appendSlice(allocator, ",\"kind\":\"quickfix\",\"diagnostics\":[");
+        // Pre-render the diagnostic echo once — used by both the explain
+        // entry and the auto-fix entry below.
+        var echo_buf = std.ArrayList(u8){};
+        defer echo_buf.deinit(allocator);
         if (a.diag_json) |echo| {
-            try out.appendSlice(allocator, echo);
+            try echo_buf.appendSlice(allocator, echo);
         } else {
-            // Synthesise the minimal diagnostic shape (range + code + a short
-            // message) so non-VS-Code clients can still tie the action back
-            // to something rendered in their own diagnostics list.
             const msg_json = try jsonStringify(allocator, summary_text);
             defer allocator.free(msg_json);
             const synthetic = try std.fmt.allocPrint(
@@ -1554,11 +1776,55 @@ fn renderCodeActions(allocator: std.mem.Allocator, actions: []const CodeActionDi
                 .{ a.start_line, a.start_col, a.end_line, a.end_col, code_id_json, msg_json },
             );
             defer allocator.free(synthetic);
-            try out.appendSlice(allocator, synthetic);
+            try echo_buf.appendSlice(allocator, synthetic);
         }
+
+        // ---- Explain action ----
+        if (!first) try out.append(allocator, ',');
+        first = false;
+
+        const title = try std.fmt.allocPrint(allocator, "Explain {s}: {s}", .{ code_id, summary_text });
+        defer allocator.free(title);
+        const title_json = try jsonStringify(allocator, title);
+        defer allocator.free(title_json);
+
+        try out.appendSlice(allocator, "{\"title\":");
+        try out.appendSlice(allocator, title_json);
+        try out.appendSlice(allocator, ",\"kind\":\"quickfix\",\"diagnostics\":[");
+        try out.appendSlice(allocator, echo_buf.items);
         try out.appendSlice(allocator, "],\"command\":{\"title\":\"Explain\",\"command\":\"zigpp.explain\",\"arguments\":[");
         try out.appendSlice(allocator, code_id_json);
         try out.appendSlice(allocator, "]}}");
+
+        // ---- Auto-fix action (optional) ----
+        if (a.auto_fix) |fx| {
+            try out.append(allocator, ',');
+
+            const fx_title_json = try jsonStringify(allocator, fx.title);
+            defer allocator.free(fx_title_json);
+            const fx_uri_json = try jsonStringify(allocator, fx.uri);
+            defer allocator.free(fx_uri_json);
+            const fx_text_json = try jsonStringify(allocator, fx.insert_text);
+            defer allocator.free(fx_text_json);
+
+            try out.appendSlice(allocator, "{\"title\":");
+            try out.appendSlice(allocator, fx_title_json);
+            try out.appendSlice(allocator, ",\"kind\":\"quickfix\",\"diagnostics\":[");
+            try out.appendSlice(allocator, echo_buf.items);
+            try out.appendSlice(allocator, "],\"edit\":{\"changes\":{");
+            try out.appendSlice(allocator, fx_uri_json);
+            try out.appendSlice(allocator, ":[{\"range\":");
+            const r = try std.fmt.allocPrint(
+                allocator,
+                "{{\"start\":{{\"line\":{d},\"character\":{d}}},\"end\":{{\"line\":{d},\"character\":{d}}}}}",
+                .{ fx.line, fx.col, fx.line, fx.col },
+            );
+            defer allocator.free(r);
+            try out.appendSlice(allocator, r);
+            try out.appendSlice(allocator, ",\"newText\":");
+            try out.appendSlice(allocator, fx_text_json);
+            try out.appendSlice(allocator, "}]}}}");
+        }
     }
     try out.append(allocator, ']');
     return out.toOwnedSlice(allocator);
@@ -2757,6 +3023,138 @@ test "buildCodeActions skips ctx diagnostics with unknown codes" {
     const out = try buildCodeActions(a, &server, "file:///x.zpp", range, ctx_diags);
     defer a.free(out);
     try std.testing.expectEqualStrings("[]", out);
+}
+
+/// Test helper: seed `server.docs` for `uri` with `text`. Mirrors what
+/// `textDocument/didOpen` does so auto-fix tests can describe the cached
+/// source without going through the JSON-RPC layer.
+fn seedDoc(server: *Server, uri: []const u8, text: []const u8) !void {
+    const key = try server.allocator.dupe(u8, uri);
+    errdefer server.allocator.free(key);
+    const val = try server.allocator.dupe(u8, text);
+    try server.docs.put(key, val);
+}
+
+test "buildCodeActions Z0010 emits both Explain and Auto-fix actions" {
+    const a = std.testing.allocator;
+    var server = Server.init(a);
+    defer server.deinit();
+
+    // The cached source is what the auto-fix path parses — it must contain
+    // a real `owned struct` so `buildZ0010AutoFix` can locate the close
+    // brace and emit a TextEdit.
+    const src =
+        \\owned struct Buffer {
+        \\    data: []u8,
+        \\}
+    ;
+    try seedDoc(&server, "file:///x.zpp", src);
+    try seedHoverDiags(&server, "file:///x.zpp", &.{
+        .{ .line = 0, .col_start = 0, .col_end = 19, .code = .z0010_missing_deinit_on_owned },
+    });
+
+    const range: LspRange = .{ .start_line = 0, .start_col = 0, .end_line = 0, .end_col = 0 };
+    const out = try buildCodeActions(a, &server, "file:///x.zpp", range, null);
+    defer a.free(out);
+
+    // Both the Explain entry and the Auto-fix entry must appear.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"title\":\"Explain Z0010:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Auto-fix: add `pub fn deinit") != null);
+    // Two quickfix entries -> exactly two `"kind":"quickfix"` markers.
+    var qf_count: usize = 0;
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, out, idx, "\"kind\":\"quickfix\"")) |pos| {
+        qf_count += 1;
+        idx = pos + 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), qf_count);
+    // Auto-fix carries a WorkspaceEdit with the deinit stub text.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"edit\":{\"changes\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn deinit") != null);
+}
+
+test "buildCodeActions Z0040 auto-fix stubs every missing trait method" {
+    const a = std.testing.allocator;
+    var server = Server.init(a);
+    defer server.deinit();
+
+    // Trait declares two methods; impl block only defines `greet` -> `wave`
+    // is missing and must show up as a stub in the WorkspaceEdit.
+    const src =
+        \\trait Greeter {
+        \\    fn greet(self) void;
+        \\    fn wave(self) void;
+        \\}
+        \\impl Greeter for Friendly {
+        \\    pub fn greet(self) void {}
+        \\}
+    ;
+    try seedDoc(&server, "file:///x.zpp", src);
+    try seedHoverDiags(&server, "file:///x.zpp", &.{
+        .{ .line = 4, .col_start = 0, .col_end = 25, .code = .z0040_impl_missing_method },
+    });
+
+    const range: LspRange = .{ .start_line = 4, .start_col = 0, .end_line = 4, .end_col = 0 };
+    const out = try buildCodeActions(a, &server, "file:///x.zpp", range, null);
+    defer a.free(out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"title\":\"Explain Z0040:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Auto-fix: stub missing trait method(s)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"edit\":{\"changes\":") != null);
+    // The stub for the only missing method (`wave`) must be present, and
+    // the already-implemented `greet` must NOT generate a duplicate stub.
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn wave") != null);
+    // `greet` appears in the diag echo / synthetic message, so we instead
+    // check for the stub-specific opener; only one stub line exists.
+    var wave_count: usize = 0;
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, out, idx, "pub fn wave")) |pos| {
+        wave_count += 1;
+        idx = pos + 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), wave_count);
+    // Two quickfix entries (Explain + Auto-fix).
+    var qf_count: usize = 0;
+    idx = 0;
+    while (std.mem.indexOfPos(u8, out, idx, "\"kind\":\"quickfix\"")) |pos| {
+        qf_count += 1;
+        idx = pos + 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), qf_count);
+}
+
+test "buildCodeActions emits ONLY Explain action for non-autofixable codes" {
+    const a = std.testing.allocator;
+    var server = Server.init(a);
+    defer server.deinit();
+
+    // Z0030 (effect violation) has no auto-fix path — only the Explain
+    // entry should appear, even though the doc text is cached.
+    const src =
+        \\fn pure() void effects(.noalloc) {
+        \\    _ = std.heap.page_allocator.alloc(u8, 1) catch unreachable;
+        \\}
+    ;
+    try seedDoc(&server, "file:///x.zpp", src);
+    try seedHoverDiags(&server, "file:///x.zpp", &.{
+        .{ .line = 1, .col_start = 8, .col_end = 40, .code = .z0030_effect_violation },
+    });
+
+    const range: LspRange = .{ .start_line = 1, .start_col = 0, .end_line = 1, .end_col = 0 };
+    const out = try buildCodeActions(a, &server, "file:///x.zpp", range, null);
+    defer a.free(out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"title\":\"Explain Z0030:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Auto-fix:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"edit\":") == null);
+    // Exactly one quickfix entry.
+    var qf_count: usize = 0;
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, out, idx, "\"kind\":\"quickfix\"")) |pos| {
+        qf_count += 1;
+        idx = pos + 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), qf_count);
 }
 
 /// Parse a `buildSemanticTokens` JSON array (e.g. `[1,2,3,4,5,...]`) back
