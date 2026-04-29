@@ -122,9 +122,9 @@ pub const Token = struct {
     }
 };
 
-const Keyword = struct { name: []const u8, kind: TokenKind };
+pub const Keyword = struct { name: []const u8, kind: TokenKind };
 
-const keywords = [_]Keyword{
+pub const keywords = [_]Keyword{
     .{ .name = "const", .kind = .kw_const },
     .{ .name = "var", .kind = .kw_var },
     .{ .name = "fn", .kind = .kw_fn },

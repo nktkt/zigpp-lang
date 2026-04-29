@@ -24,6 +24,11 @@ official Zig extension.
   structs, impl blocks, extern interfaces, and top-level functions show up
   in the VS Code Outline panel and breadcrumbs, with one level of method
   children for traits/structs/impls.
+- **Completion** (`textDocument/completion`): the language server returns
+  every Zig++ keyword plus the names of top-level decls in the current
+  document (functions, traits, structs, owned structs, extern interfaces,
+  impl targets). Trigger characters are `.` and `:`. Context-aware
+  completion (after `.`, after `impl`, etc.) is not implemented yet.
 - "Run current file" command that shells out to `zpp run` and streams output
   to the Zig++ output channel.
 - "Show lowered Zig" command that opens the result of `zpp lower` in a new
@@ -100,9 +105,10 @@ code --install-extension zigpp-0.1.0.vsix
 
 - The LSP is intentionally MVP. It currently surfaces diagnostics from the
   `zpp` parser/sema and supports `textDocument/formatting`,
-  `textDocument/hover`, and `textDocument/documentSymbol` (Outline view).
-  Workspace symbol search, go-to-definition, completion, and rename are not
-  implemented yet.
+  `textDocument/hover`, `textDocument/documentSymbol` (Outline view), and a
+  context-free `textDocument/completion` (keywords + top-level decl names).
+  Workspace symbol search, go-to-definition, context-aware completion, and
+  rename are not implemented yet.
 - Semantic highlighting falls back to the TextMate grammar — there's no
   semantic-tokens server response yet.
 - The grammar uses a heuristic (PascalCase identifier) for type names. In

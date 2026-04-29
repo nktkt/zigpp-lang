@@ -180,7 +180,7 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
 
     if (std.mem.eql(u8, method, "initialize")) {
         const caps =
-            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false}},"serverInfo":{"name":"zpp-lsp","version":"0.2.0"}}
+            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"completionProvider":{"triggerCharacters":[".",":"]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false}},"serverInfo":{"name":"zpp-lsp","version":"0.3.0"}}
         ;
         try writeResult(server.allocator, id_text, caps);
         return;
@@ -220,6 +220,10 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
     }
     if (std.mem.eql(u8, method, "textDocument/documentSymbol")) {
         try onDocumentSymbol(server, id_text, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/completion")) {
+        try onCompletion(server, id_text, params);
         return;
     }
     if (obj.get("id") != null) {
@@ -641,6 +645,125 @@ fn buildDocumentSymbols(allocator: std.mem.Allocator, source: []const u8) ![]u8 
     return out.toOwnedSlice(allocator);
 }
 
+/// LSP CompletionItemKind integers
+/// (https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#completionItemKind).
+/// Only the few values we emit are listed.
+const CompletionItemKind = enum(u8) {
+    function = 3,
+    class = 7,
+    keyword = 14,
+};
+
+fn onCompletion(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    // We deliberately ignore the position context for the MVP; the result is
+    // always (keywords ∪ top-level idents from the cached doc).
+    var uri_opt: ?[]const u8 = null;
+    if (params) |p| {
+        if (p == .object) {
+            if (p.object.get("textDocument")) |td| {
+                if (td == .object) {
+                    if (td.object.get("uri")) |u| {
+                        if (u == .string) uri_opt = u.string;
+                    }
+                }
+            }
+        }
+    }
+    const text_opt: ?[]const u8 = if (uri_opt) |uri| server.docs.get(uri) else null;
+    const result = try buildCompletionResult(server.allocator, text_opt);
+    defer server.allocator.free(result);
+    try writeResult(server.allocator, id_text, result);
+}
+
+/// Build the `result` JSON object for a completion response. Always emits
+/// every Zig++ keyword; if `text` parses, also adds top-level decl names.
+/// Falls back to keywords-only on parse failure or missing doc text.
+fn buildCompletionResult(allocator: std.mem.Allocator, text: ?[]const u8) ![]u8 {
+    var seen = std.StringHashMap(void).init(allocator);
+    defer seen.deinit();
+
+    var items = std.ArrayList(u8){};
+    defer items.deinit(allocator);
+    try items.append(allocator, '[');
+    var first = true;
+
+    // Keywords come straight from compiler/token.zig so the LSP can never
+    // drift from the lexer's notion of what's reserved.
+    inline for (compiler.token.keywords) |kw| {
+        if (!seen.contains(kw.name)) {
+            try seen.put(kw.name, {});
+            if (!first) try items.append(allocator, ',');
+            first = false;
+            try appendCompletionItem(&items, allocator, kw.name, .keyword);
+        }
+    }
+
+    // Top-level identifiers from a fresh parse of the cached doc text. Best-
+    // effort: any failure (no doc, parse error) leaves us with the keyword-
+    // only list.
+    if (text) |src| {
+        addIdentItems(allocator, &items, &first, &seen, src) catch {};
+    }
+
+    try items.append(allocator, ']');
+
+    return try std.fmt.allocPrint(
+        allocator,
+        "{{\"isIncomplete\":false,\"items\":{s}}}",
+        .{items.items},
+    );
+}
+
+fn addIdentItems(
+    allocator: std.mem.Allocator,
+    items: *std.ArrayList(u8),
+    first: *bool,
+    seen: *std.StringHashMap(void),
+    source: []const u8,
+) !void {
+    var diags = compiler.Diagnostics.init(allocator);
+    defer diags.deinit();
+    var arena = compiler.ast.Arena.init(allocator);
+    defer arena.deinit();
+
+    const file = try compiler.parseSource(allocator, source, &arena, &diags);
+    for (file.decls) |decl| {
+        const entry: ?struct { name: []const u8, kind: CompletionItemKind } = switch (decl) {
+            .fn_decl => |fd| .{ .name = fd.sig.name, .kind = .function },
+            .trait => |t| .{ .name = t.name, .kind = .class },
+            .owned_struct => |os| .{ .name = os.name, .kind = .class },
+            .struct_decl => |sd| .{ .name = sd.name, .kind = .class },
+            .extern_interface => |ei| .{ .name = ei.name, .kind = .class },
+            .impl_block => |ib| .{ .name = ib.target_type, .kind = .class },
+            .raw => null,
+        };
+        if (entry) |e| {
+            if (seen.contains(e.name)) continue;
+            try seen.put(e.name, {});
+            if (!first.*) try items.append(allocator, ',');
+            first.* = false;
+            try appendCompletionItem(items, allocator, e.name, e.kind);
+        }
+    }
+}
+
+fn appendCompletionItem(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    label: []const u8,
+    kind: CompletionItemKind,
+) !void {
+    const label_json = try jsonStringify(allocator, label);
+    defer allocator.free(label_json);
+    const buf = try std.fmt.allocPrint(
+        allocator,
+        "{{\"label\":{s},\"kind\":{d}}}",
+        .{ label_json, @intFromEnum(kind) },
+    );
+    defer allocator.free(buf);
+    try out.appendSlice(allocator, buf);
+}
+
 fn countLines(s: []const u8) usize {
     var n: usize = 0;
     for (s) |c| if (c == '\n') {
@@ -747,4 +870,63 @@ test "buildDocumentSymbols returns [] on empty source" {
     const out = try buildDocumentSymbols(a, "");
     defer a.free(out);
     try std.testing.expectEqualStrings("[]", out);
+}
+
+test "buildCompletionResult emits keywords and top-level idents" {
+    const a = std.testing.allocator;
+    const src =
+        \\trait Writer { fn write(self, bytes: []const u8) !usize; }
+        \\struct Counter {
+        \\    n: usize,
+        \\    pub fn bump(self: *Counter) void { self.n += 1; }
+        \\}
+        \\fn helper(x: usize) usize { return x + 1; }
+    ;
+    const out = try buildCompletionResult(a, src);
+    defer a.free(out);
+
+    // Result envelope.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"isIncomplete\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"items\":[") != null);
+
+    // A handful of keywords sourced from compiler/token.zig.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"label\":\"fn\",\"kind\":14") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"label\":\"trait\",\"kind\":14") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"label\":\"effects\",\"kind\":14") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"label\":\"impl\",\"kind\":14") != null);
+
+    // Identifiers from the parsed top-level decls.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"label\":\"Writer\",\"kind\":7") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"label\":\"Counter\",\"kind\":7") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"label\":\"helper\",\"kind\":3") != null);
+}
+
+test "buildCompletionResult falls back to keywords on missing doc" {
+    const a = std.testing.allocator;
+    const out = try buildCompletionResult(a, null);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"label\":\"fn\",\"kind\":14") != null);
+    // No identifier items should be present (kind 3 / kind 7).
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"kind\":3") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"kind\":7") == null);
+}
+
+test "buildCompletionResult dedupes label collisions between idents and keywords" {
+    const a = std.testing.allocator;
+    // A user-defined top-level fn whose name collides with a keyword would
+    // otherwise produce two items with the same label. dedup picks the
+    // keyword (which we emit first).
+    const src = "fn fn_helper() void {}";
+    const out = try buildCompletionResult(a, src);
+    defer a.free(out);
+    // Only one entry for the keyword `fn`.
+    var count: usize = 0;
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, out, idx, "\"label\":\"fn\"")) |pos| {
+        count += 1;
+        idx = pos + 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
+    // The user's fn_helper still shows up.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"label\":\"fn_helper\",\"kind\":3") != null);
 }
