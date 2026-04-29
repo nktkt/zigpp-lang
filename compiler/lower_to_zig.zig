@@ -354,7 +354,7 @@ pub const Lowerer = struct {
             try self.lowerParam(p);
         }
         try self.write(") ");
-        try self.write(normalizeReturn(fd.sig.return_type));
+        try self.writeRewrittenType(normalizeReturn(fd.sig.return_type));
 
         if (fd.body) |body| {
             try self.write(" {\n");

@@ -23,6 +23,11 @@
   - [effects_pure](./api/effects_pure.md)
   - [async_group](./api/async_group.md)
   - [event_bus](./api/event_bus.md)
+  - [multi_file/util](./api/multi_file/util.md)
+  - [multi_file/main](./api/multi_file/main.md)
+  - [multi_file_pub/api](./api/multi_file_pub/api.md)
+  - [multi_file_pub/main](./api/multi_file_pub/main.md)
+  - [cli/greet](./api/cli/greet.md)
 
 # Project
 
