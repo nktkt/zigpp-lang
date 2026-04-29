@@ -140,3 +140,48 @@ test "Z0040: complete impl produces no diagnostic" {
     defer result.diags.deinit();
     try std.testing.expect(!hasCode(&result.diags, "Z0040"));
 }
+
+// --- Z0030 effect inference (MVP) ---
+
+test "Z0030: noalloc annotation matches inference does not fire" {
+    // `pure` declares .noalloc and never calls .alloc/.create/.realloc/.dupe,
+    // and its only callee `add` is itself .noalloc. Inference agrees with
+    // the annotation, so Z0030 must not fire.
+    const a = std.testing.allocator;
+    const src =
+        \\fn add(x: i32, y: i32) i32 { return x + y; }
+        \\effects(.noalloc) fn pure(x: i32, y: i32) i32 {
+        \\    const z = add(x, y);
+        \\    return z * 2;
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(!hasCode(&result.diags, "Z0030"));
+}
+
+test "Z0030: noalloc fn that transitively allocates fires once" {
+    // `wrapper` declares .noalloc but calls `inner`, whose body literally
+    // contains `.alloc(`. Inference propagates `.alloc` from `inner` up to
+    // `wrapper`, so Z0030 must fire on `wrapper` (transitive case). It must
+    // NOT fire on `inner` itself because `inner` does not declare .noalloc.
+    // We further check that the diagnostic appears exactly once.
+    const a = std.testing.allocator;
+    const src =
+        \\fn inner(allocator: std.mem.Allocator) ![]u8 {
+        \\    const xs = try allocator.alloc(u8, 4);
+        \\    return xs;
+        \\}
+        \\effects(.noalloc) fn wrapper(allocator: std.mem.Allocator) ![]u8 {
+        \\    return try inner(allocator);
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(hasCode(&result.diags, "Z0030"));
+    var z0030_count: usize = 0;
+    for (result.diags.items.items) |d| {
+        if (std.mem.eql(u8, d.code.id(), "Z0030")) z0030_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), z0030_count);
+}
