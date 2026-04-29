@@ -4,6 +4,16 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.15](https://github.com/nktkt/zigpp-lang/compare/v0.1.14...v0.1.15) (2026-04-29)
+
+
+### Features
+
+* **async:** real concurrent TaskGroup with JoinHandle(T) ([#30](https://github.com/nktkt/zigpp-lang/issues/30)) ([26cae90](https://github.com/nktkt/zigpp-lang/commit/26cae9074c85bb76032d31ab866f6ef352d5b867))
+* **derive:** add Iterator, Serialize, Compare, FromStr helpers ([#29](https://github.com/nktkt/zigpp-lang/issues/29)) ([bf348f4](https://github.com/nktkt/zigpp-lang/commit/bf348f4442833ac1cf437522774a2c5481f949b9))
+* **sema:** Z0040 — impl missing trait method ([#33](https://github.com/nktkt/zigpp-lang/issues/33)) ([dacb08f](https://github.com/nktkt/zigpp-lang/commit/dacb08f724b3ecf376ae6b7242e3d6a80e8c6f4f))
+* **tools:** generate build.zig shim when project has none ([#31](https://github.com/nktkt/zigpp-lang/issues/31)) ([be8dfcd](https://github.com/nktkt/zigpp-lang/commit/be8dfcdf65ad7050e5d0557d0f56106803a2e1e6)), closes [#23](https://github.com/nktkt/zigpp-lang/issues/23)
+
 ## [0.1.14](https://github.com/nktkt/zigpp-lang/compare/v0.1.13...v0.1.14) (2026-04-29)
 
 
