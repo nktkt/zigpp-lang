@@ -7,11 +7,15 @@ pub const SemaResult = struct {
     allocator: std.mem.Allocator,
     /// Set of trait names declared in the file.
     traits: std.StringHashMap(void),
+    /// Method-name lists per trait so impl checks can cross-verify.
+    /// Slices reference the original AST arena and are not freed here.
+    trait_methods: std.StringHashMap([]const ast.TraitMethod),
     /// Map of owned-struct names → whether they have a deinit method.
     owned_structs: std.StringHashMap(bool),
 
     pub fn deinit(self: *SemaResult) void {
         self.traits.deinit();
+        self.trait_methods.deinit();
         self.owned_structs.deinit();
     }
 };
@@ -28,6 +32,7 @@ pub const Sema = struct {
         var result: SemaResult = .{
             .allocator = self.allocator,
             .traits = std.StringHashMap(void).init(self.allocator),
+            .trait_methods = std.StringHashMap([]const ast.TraitMethod).init(self.allocator),
             .owned_structs = std.StringHashMap(bool).init(self.allocator),
         };
         errdefer result.deinit();
@@ -45,8 +50,14 @@ pub const Sema = struct {
         _ = self;
         for (file.decls) |d| {
             switch (d) {
-                .trait => |t| try r.traits.put(t.name, {}),
-                .extern_interface => |e| try r.traits.put(e.name, {}),
+                .trait => |t| {
+                    try r.traits.put(t.name, {});
+                    try r.trait_methods.put(t.name, t.methods);
+                },
+                .extern_interface => |e| {
+                    try r.traits.put(e.name, {});
+                    try r.trait_methods.put(e.name, e.methods);
+                },
                 .owned_struct => |o| {
                     var has_deinit = false;
                     for (o.fns) |f| {
@@ -100,6 +111,33 @@ pub const Sema = struct {
                             i.span,
                             "impl references unknown trait '{s}'",
                             .{i.trait_name},
+                        );
+                        continue;
+                    }
+                    // Cross-check that every method declared by the trait is
+                    // present in this impl. Missing methods → Z0040.
+                    const methods = r.trait_methods.get(i.trait_name) orelse continue;
+                    var missing: std.ArrayList([]const u8) = .{};
+                    defer missing.deinit(self.allocator);
+                    for (methods) |m| {
+                        var found = false;
+                        for (i.fns) |fd| {
+                            if (std.mem.eql(u8, fd.sig.name, m.name)) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) try missing.append(self.allocator, m.name);
+                    }
+                    if (missing.items.len > 0) {
+                        const list = try joinNames(self.allocator, missing.items);
+                        defer self.allocator.free(list);
+                        try self.diags.emit(
+                            .err,
+                            .z0040_impl_missing_method,
+                            i.span,
+                            "impl {s} for {s} is missing method(s): {s}",
+                            .{ i.trait_name, i.target_type, list },
                         );
                     }
                 },
@@ -288,6 +326,19 @@ pub const Sema = struct {
 /// Heuristic: does `text` look like an allocator-using call? We check for
 /// identifiers containing "alloc"/"init"/"create" near a token that resembles
 /// an allocator argument. For MVP we keep this loose.
+/// Join name slices into a single comma-separated string. Caller frees.
+fn joinNames(allocator: std.mem.Allocator, names: []const []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(allocator);
+    for (names, 0..) |n, i| {
+        if (i > 0) try out.appendSlice(allocator, ", ");
+        try out.append(allocator, '\'');
+        try out.appendSlice(allocator, n);
+        try out.append(allocator, '\'');
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 fn callsAllocator(text: []const u8) bool {
     if (containsToken(text, "alloc")) return true;
     if (containsToken(text, "create")) return true;
