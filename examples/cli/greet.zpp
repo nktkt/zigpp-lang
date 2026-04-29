@@ -1,0 +1,203 @@
+/// greet.zpp — small CLI tool demonstrating Zig++ end-to-end.
+///
+/// One file, six Zig++ features:
+///   trait      — Greeter, with three concrete impls
+///   impl       — for English / Japanese / Pirate
+///   dyn        — chosen at runtime from a string flag
+///   owned      — Args parses argv into an owned struct with deinit
+///   derive     — Greeting payload gets Hash + Eq + Debug
+///   requires   — locale-name length pre-check
+///
+/// Usage:
+///   greet [--locale en|ja|pirate] [name]   default: en, World
+///   greet --help
+///   greet --list
+///
+/// Run via:
+///   zpp run examples/cli/greet.zpp -- --locale ja Ada
+///   zpp run examples/cli/greet.zpp -- --list
+///   zpp run examples/cli/greet.zpp -- pirate Roger
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+trait Greeter {
+    fn greet(self, name: []const u8) void;
+    fn locale(self) []const u8;
+}
+
+const English = struct {};
+const Japanese = struct {};
+const Pirate = struct {};
+
+// Zero-sized impl values held at module scope so dyn pointers into them
+// stay valid for the whole program's lifetime.
+var en_impl = English{};
+var ja_impl = Japanese{};
+var pi_impl = Pirate{};
+
+impl Greeter for English {
+    fn greet(self, name: []const u8) void {
+        _ = self;
+        std.debug.print("Hello, {s}!\n", .{name});
+    }
+    fn locale(self) []const u8 {
+        _ = self;
+        return "en";
+    }
+}
+
+impl Greeter for Japanese {
+    fn greet(self, name: []const u8) void {
+        _ = self;
+        std.debug.print("こんにちは、{s}さん!\n", .{name});
+    }
+    fn locale(self) []const u8 {
+        _ = self;
+        return "ja";
+    }
+}
+
+impl Greeter for Pirate {
+    fn greet(self, name: []const u8) void {
+        _ = self;
+        std.debug.print("Ahoy, {s}! Splice the mainbrace! 🏴‍☠️\n", .{name});
+    }
+    fn locale(self) []const u8 {
+        _ = self;
+        return "pirate";
+    }
+}
+
+const Greeting = struct {
+    locale_id: []const u8,
+    name: []const u8,
+} derive(.{ Hash, Eq, Debug });
+
+owned struct Args {
+    locale: []const u8,
+    name: []const u8,
+    show_list: bool,
+    show_help: bool,
+
+    pub fn init(allocator: std.mem.Allocator, argv: [][:0]u8) Args {
+        _ = allocator;
+        var out = Args{
+            .locale = "en",
+            .name = "World",
+            .show_list = false,
+            .show_help = false,
+        };
+        var i: usize = 1; // skip argv[0]
+        var positional: usize = 0;
+        var locale_via_flag = false;
+        while (i < argv.len) : (i += 1) {
+            const a = argv[i];
+            if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
+                out.show_help = true;
+            } else if (std.mem.eql(u8, a, "--list")) {
+                out.show_list = true;
+            } else if (std.mem.eql(u8, a, "--locale") or std.mem.eql(u8, a, "-l")) {
+                if (i + 1 < argv.len) {
+                    i += 1;
+                    out.locale = argv[i];
+                    locale_via_flag = true;
+                }
+            } else {
+                // Positional: if --locale was used, all positionals are name.
+                // Otherwise positional[0] is locale, positional[1] is name.
+                if (locale_via_flag) {
+                    if (positional == 0) out.name = a;
+                } else {
+                    if (positional == 0) {
+                        out.locale = a;
+                    } else if (positional == 1) {
+                        out.name = a;
+                    }
+                }
+                positional += 1;
+            }
+        }
+        return out;
+    }
+
+    pub fn deinit(self: *Args) void {
+        // Args borrows slices from argv; nothing to free, but the
+        // owned-struct contract still requires a deinit.
+        _ = self;
+    }
+}
+
+fn pickGreeter(locale_id: []const u8) ?dyn Greeter {
+    if (std.mem.eql(u8, locale_id, "en")) {
+        return zpp.Dyn(Greeter_VTable).init(English, &en_impl, &Greeter_impl_for_English);
+    }
+    if (std.mem.eql(u8, locale_id, "ja")) {
+        return zpp.Dyn(Greeter_VTable).init(Japanese, &ja_impl, &Greeter_impl_for_Japanese);
+    }
+    if (std.mem.eql(u8, locale_id, "pirate")) {
+        return zpp.Dyn(Greeter_VTable).init(Pirate, &pi_impl, &Greeter_impl_for_Pirate);
+    }
+    return null;
+}
+
+fn printHelp() void {
+    // The Zig++ lexer doesn't yet recognise the `\\`-prefixed multi-line
+    // string form, so help is emitted as a sequence of regular prints.
+    std.debug.print("greet -- multi-locale greeter\n\n", .{});
+    std.debug.print("USAGE:\n", .{});
+    std.debug.print("    greet [--locale <id>] [<name>]\n", .{});
+    std.debug.print("    greet <locale> <name>\n", .{});
+    std.debug.print("    greet --list\n", .{});
+    std.debug.print("    greet --help\n\n", .{});
+    std.debug.print("Locales: en (default), ja, pirate\n", .{});
+}
+
+fn printList() void {
+    std.debug.print("Available locales:\n", .{});
+    inline for (.{ "en", "ja", "pirate" }) |loc| {
+        std.debug.print("  {s}\n", .{loc});
+    }
+}
+
+fn doGreet(g: dyn Greeter, name: []const u8) void
+    requires(name.len > 0)
+{
+    g.vtable.greet(g.ptr, name);
+}
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const argv = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, argv);
+
+    using args = Args.init(allocator, argv);
+
+    if (args.show_help) {
+        printHelp();
+        return;
+    }
+    if (args.show_list) {
+        printList();
+        return;
+    }
+
+    // Build a Greeting payload. Hashing it is wholly cosmetic here —
+    // we just want to show that the derive helpers compose.
+    const payload = Greeting{ .locale_id = args.locale, .name = args.name };
+    std.debug.print("# greeting hash: {x}\n", .{payload.hash()});
+
+    // Static dispatch path is unused in this binary because the locale is
+    // chosen at runtime. We reach for `dyn` so all impls share one slot.
+    const maybe_g = pickGreeter(args.locale);
+    if (maybe_g) |g| {
+        _ = g.vtable.locale(g.ptr);
+        doGreet(g, args.name);
+    } else {
+        std.debug.print("error: unknown locale '{s}'. Try `greet --list`.\n", .{args.locale});
+        std.process.exit(1);
+    }
+}
