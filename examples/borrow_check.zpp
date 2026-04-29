@@ -1,9 +1,12 @@
 /// borrow_check.zpp — demonstrates Z0021: borrow invalidated by move.
 ///
-/// The MVP borrow checker (compiler/sema.zig) tracks the FIRST `&x` per
-/// fn body. When a later `move x` fires while that borrow is recorded,
-/// sema emits Z0021. Re-binding `x` (e.g. `own var x = ...` again with
-/// a different name) clears the borrow record.
+/// The borrow checker (compiler/sema.zig, round 2) tracks ALL `&x` sites
+/// per fn body and tags each with the lexical block depth at which it
+/// was recorded. A `}` retires every borrow whose depth exceeds the new
+/// depth, so a borrow inside `{ ... }` is gone by the time control
+/// reaches code after the block. A subsequent `move x` while ANY borrow
+/// on `x` is still live fires Z0021. Re-binding `x` (`own var x = ...`
+/// again) clears the borrow list.
 ///
 /// Run:
 ///   zpp run examples/borrow_check.zpp
@@ -41,6 +44,17 @@ pub fn main() !void {
     const peek_id = peek.id;
     std.debug.print("peek id={d}\n", .{peek_id});
     consume(move peek);
+
+    // SAFE (round 2): the borrow lives only inside the inner `{ ... }`.
+    // Once the block closes, the borrow record retires, and the move
+    // below is fine. Pre-round-2 this would have tripped Z0021.
+    own var scoped = Token{ .id = 0 };
+    scoped.id = 9;
+    {
+        const ref = &scoped;
+        std.debug.print("scoped peek id={d}\n", .{ref.id});
+    }
+    consume(move scoped);
 
     // ----------------------------------------------------------------
     // BAD — uncomment to see Z0021 fire from `zpp check`:
