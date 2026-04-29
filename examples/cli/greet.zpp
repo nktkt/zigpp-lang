@@ -142,18 +142,15 @@ fn pickGreeter(locale_id: []const u8) ?dyn Greeter {
 }
 
 fn printHelp() void {
-    std.debug.print(
-        \\greet — multi-locale greeter
-        \\
-        \\USAGE:
-        \\    greet [--locale <id>] [<name>]
-        \\    greet <locale> <name>
-        \\    greet --list
-        \\    greet --help
-        \\
-        \\Locales: en (default), ja, pirate
-        \\
-    , .{});
+    // The Zig++ lexer doesn't yet recognise the `\\`-prefixed multi-line
+    // string form, so help is emitted as a sequence of regular prints.
+    std.debug.print("greet -- multi-locale greeter\n\n", .{});
+    std.debug.print("USAGE:\n", .{});
+    std.debug.print("    greet [--locale <id>] [<name>]\n", .{});
+    std.debug.print("    greet <locale> <name>\n", .{});
+    std.debug.print("    greet --list\n", .{});
+    std.debug.print("    greet --help\n\n", .{});
+    std.debug.print("Locales: en (default), ja, pirate\n", .{});
 }
 
 fn printList() void {
