@@ -202,7 +202,7 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
 
     if (std.mem.eql(u8, method, "initialize")) {
         const caps =
-            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"referencesProvider":true,"workspaceSymbolProvider":true,"renameProvider":{"prepareProvider":true},"completionProvider":{"triggerCharacters":[".",":"]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false},"codeActionProvider":{"codeActionKinds":["quickfix"]},"semanticTokensProvider":{"legend":{"tokenTypes":["keyword","string","number","comment","function","interface","struct","variable"],"tokenModifiers":["declaration"]},"full":{"delta":true},"range":true}},"serverInfo":{"name":"zpp-lsp","version":"0.10.0"}}
+            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"typeDefinitionProvider":true,"referencesProvider":true,"workspaceSymbolProvider":true,"renameProvider":{"prepareProvider":true},"completionProvider":{"triggerCharacters":[".",":"]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false},"codeActionProvider":{"codeActionKinds":["quickfix"]},"semanticTokensProvider":{"legend":{"tokenTypes":["keyword","string","number","comment","function","interface","struct","variable"],"tokenModifiers":["declaration"]},"full":{"delta":true},"range":true}},"serverInfo":{"name":"zpp-lsp","version":"0.11.0"}}
         ;
         try writeResult(server.allocator, id_text, caps);
         return;
@@ -250,6 +250,14 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
     }
     if (std.mem.eql(u8, method, "textDocument/definition")) {
         try onDefinition(server, id_text, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/typeDefinition")) {
+        try onTypeDefinition(server, id_text, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/signatureHelp")) {
+        try onSignatureHelp(server, id_text, params);
         return;
     }
     if (std.mem.eql(u8, method, "textDocument/references")) {
@@ -933,6 +941,440 @@ fn buildDefinition(
         return out.toOwnedSlice(allocator);
     }
     return allocator.dupe(u8, "null");
+}
+
+fn onTypeDefinition(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    const p = params orelse return writeResult(server.allocator, id_text, "null");
+    if (p != .object) return writeResult(server.allocator, id_text, "null");
+    const td = p.object.get("textDocument") orelse return writeResult(server.allocator, id_text, "null");
+    if (td != .object) return writeResult(server.allocator, id_text, "null");
+    const uri_v = td.object.get("uri") orelse return writeResult(server.allocator, id_text, "null");
+    if (uri_v != .string) return writeResult(server.allocator, id_text, "null");
+    const pos_v = p.object.get("position") orelse return writeResult(server.allocator, id_text, "null");
+    if (pos_v != .object) return writeResult(server.allocator, id_text, "null");
+    const line_v = pos_v.object.get("line") orelse return writeResult(server.allocator, id_text, "null");
+    const char_v = pos_v.object.get("character") orelse return writeResult(server.allocator, id_text, "null");
+    if (line_v != .integer or char_v != .integer) return writeResult(server.allocator, id_text, "null");
+    if (line_v.integer < 0 or char_v.integer < 0) return writeResult(server.allocator, id_text, "null");
+
+    const text = server.docs.get(uri_v.string) orelse {
+        try writeResult(server.allocator, id_text, "null");
+        return;
+    };
+    const allocator = server.allocator;
+    const result = try buildTypeDefinition(
+        allocator,
+        text,
+        uri_v.string,
+        @intCast(line_v.integer),
+        @intCast(char_v.integer),
+    );
+    defer allocator.free(result);
+    try writeResult(server.allocator, id_text, result);
+}
+
+/// Strip pointer / optional / slice / array prefixes from a raw type
+/// expression and return the bare leading identifier (e.g. `*Counter` ->
+/// `Counter`, `[]const u8` -> `u8`, `?[]Foo` -> `Foo`). Returns null if no
+/// identifier-start byte appears at the head of the remainder.
+fn bareTypeName(type_text: []const u8) ?[]const u8 {
+    var t = std.mem.trim(u8, type_text, " \t\r\n");
+    while (t.len > 0) {
+        const c = t[0];
+        if (c == '*' or c == '?' or c == '&') {
+            t = std.mem.trim(u8, t[1..], " \t\r\n");
+            continue;
+        }
+        if (c == '[') {
+            // Skip the bracket group `[...]` (e.g. `[]`, `[*]`, `[N]`).
+            const close = std.mem.indexOfScalar(u8, t, ']') orelse return null;
+            t = std.mem.trim(u8, t[close + 1 ..], " \t\r\n");
+            continue;
+        }
+        // Strip leading `const`/`volatile`/`align(...)` qualifiers.
+        if (std.mem.startsWith(u8, t, "const") and (t.len == 5 or !compiler.token.identCont(t[5]))) {
+            t = std.mem.trim(u8, t[5..], " \t\r\n");
+            continue;
+        }
+        if (std.mem.startsWith(u8, t, "volatile") and (t.len == 8 or !compiler.token.identCont(t[8]))) {
+            t = std.mem.trim(u8, t[8..], " \t\r\n");
+            continue;
+        }
+        break;
+    }
+    if (t.len == 0) return null;
+    if (!compiler.token.identStart(t[0])) return null;
+    var end: usize = 1;
+    while (end < t.len and compiler.token.identCont(t[end])) end += 1;
+    return t[0..end];
+}
+
+/// Build the JSON `result` payload (a Location object or "null") for a
+/// same-file typeDefinition lookup. Walks every fn parameter list visible
+/// in `source` (top-level fns plus methods inside structs / owned structs /
+/// impl blocks). When a parameter's name matches the cursor identifier and
+/// its type expression resolves to a known top-level decl, returns that
+/// decl's location.
+fn buildTypeDefinition(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    uri: []const u8,
+    line: usize,
+    character: usize,
+) ![]u8 {
+    const off = posToOffset(source, line, character) orelse return allocator.dupe(u8, "null");
+    const ident = identAt(source, off) orelse return allocator.dupe(u8, "null");
+
+    var diags = compiler.Diagnostics.init(allocator);
+    defer diags.deinit();
+    var arena = compiler.ast.Arena.init(allocator);
+    defer arena.deinit();
+    const file = compiler.parseSource(allocator, source, &arena, &diags) catch {
+        return allocator.dupe(u8, "null");
+    };
+
+    // Find the first fn-param whose name == ident. We accept matches
+    // anywhere in the file (top-level fns, struct methods, impl methods).
+    var matched_type: ?[]const u8 = null;
+    outer: for (file.decls) |decl| {
+        switch (decl) {
+            .fn_decl => |fd| {
+                for (fd.sig.params) |prm| {
+                    if (std.mem.eql(u8, prm.name, ident) and prm.mode == .plain) {
+                        matched_type = prm.type_text;
+                        break :outer;
+                    }
+                }
+            },
+            .owned_struct => |os| {
+                for (os.fns) |fd| for (fd.sig.params) |prm| {
+                    if (std.mem.eql(u8, prm.name, ident) and prm.mode == .plain) {
+                        matched_type = prm.type_text;
+                        break :outer;
+                    }
+                };
+            },
+            .struct_decl => |sd| {
+                for (sd.fns) |fd| for (fd.sig.params) |prm| {
+                    if (std.mem.eql(u8, prm.name, ident) and prm.mode == .plain) {
+                        matched_type = prm.type_text;
+                        break :outer;
+                    }
+                };
+            },
+            .impl_block => |ib| {
+                for (ib.fns) |fd| for (fd.sig.params) |prm| {
+                    if (std.mem.eql(u8, prm.name, ident) and prm.mode == .plain) {
+                        matched_type = prm.type_text;
+                        break :outer;
+                    }
+                };
+            },
+            else => {},
+        }
+    }
+    const type_text = matched_type orelse return allocator.dupe(u8, "null");
+    const bare = bareTypeName(type_text) orelse return allocator.dupe(u8, "null");
+
+    for (file.decls) |decl| {
+        const name: ?[]const u8 = switch (decl) {
+            .fn_decl => |fd| fd.sig.name,
+            .trait => |t| t.name,
+            .owned_struct => |os| os.name,
+            .struct_decl => |sd| sd.name,
+            .extern_interface => |ei| ei.name,
+            .impl_block, .raw => null,
+        };
+        if (name == null) continue;
+        if (!std.mem.eql(u8, name.?, bare)) continue;
+
+        var out = std.ArrayList(u8){};
+        defer out.deinit(allocator);
+        const uri_json = try jsonStringify(allocator, uri);
+        defer allocator.free(uri_json);
+        try out.appendSlice(allocator, "{\"uri\":");
+        try out.appendSlice(allocator, uri_json);
+        try out.appendSlice(allocator, ",\"range\":");
+        try appendRangeJson(&out, allocator, rangeFromSpan(source, decl.span()));
+        try out.append(allocator, '}');
+        return out.toOwnedSlice(allocator);
+    }
+    return allocator.dupe(u8, "null");
+}
+
+fn onSignatureHelp(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    const p = params orelse return writeResult(server.allocator, id_text, "null");
+    if (p != .object) return writeResult(server.allocator, id_text, "null");
+    const td = p.object.get("textDocument") orelse return writeResult(server.allocator, id_text, "null");
+    if (td != .object) return writeResult(server.allocator, id_text, "null");
+    const uri_v = td.object.get("uri") orelse return writeResult(server.allocator, id_text, "null");
+    if (uri_v != .string) return writeResult(server.allocator, id_text, "null");
+    const pos_v = p.object.get("position") orelse return writeResult(server.allocator, id_text, "null");
+    if (pos_v != .object) return writeResult(server.allocator, id_text, "null");
+    const line_v = pos_v.object.get("line") orelse return writeResult(server.allocator, id_text, "null");
+    const char_v = pos_v.object.get("character") orelse return writeResult(server.allocator, id_text, "null");
+    if (line_v != .integer or char_v != .integer) return writeResult(server.allocator, id_text, "null");
+    if (line_v.integer < 0 or char_v.integer < 0) return writeResult(server.allocator, id_text, "null");
+
+    const text = server.docs.get(uri_v.string) orelse {
+        try writeResult(server.allocator, id_text, "null");
+        return;
+    };
+    const allocator = server.allocator;
+    const result = try buildSignatureHelp(
+        allocator,
+        text,
+        @intCast(line_v.integer),
+        @intCast(char_v.integer),
+    );
+    defer allocator.free(result);
+    try writeResult(server.allocator, id_text, result);
+}
+
+/// Result of walking back from the cursor to find the enclosing call.
+const CallContext = struct {
+    /// Identifier text of the callee (slice into source).
+    callee: []const u8,
+    /// 0-based active parameter index (count of unbalanced commas between
+    /// the open `(` and the cursor).
+    active_param: u32,
+};
+
+/// Walk back from `cursor` through `source`, balancing parens/brackets/braces
+/// and skipping strings, char literals, and `//` line comments, to locate the
+/// open `(` of the innermost enclosing call. Returns the callee identifier
+/// (the token immediately before that `(`) plus the active-parameter index.
+/// Returns null when the cursor is not inside a call.
+fn findCallContext(source: []const u8, cursor: u32) ?CallContext {
+    if (cursor > source.len) return null;
+    // First pass: walk *backward* from cursor-1 to find the open `(` whose
+    // matching `)` has not yet been seen. We keep a single counter for round
+    // parens; nested `[...]` and `{...}` are also balanced so a `(` inside a
+    // string-shaped or array-shaped form doesn't fool us.
+    var i: isize = @as(isize, @intCast(cursor)) - 1;
+    var paren_depth: i32 = 0;
+    var bracket_depth: i32 = 0;
+    var brace_depth: i32 = 0;
+    var commas_at_depth: u32 = 0;
+    var open_paren_off: ?u32 = null;
+    while (i >= 0) : (i -= 1) {
+        const idx: usize = @intCast(i);
+        const c = source[idx];
+        // Skip characters inside `// ...` line comments. We detect by scanning
+        // forward from line-start for the first `//` and checking idx >= that.
+        if (c == '\n') {
+            // No-op; comments end at newline.
+        } else {
+            // Detect if `idx` is inside a `//` comment on its line by looking
+            // forward for the line's first `//` (cheap: rare in hot path).
+            if (insideLineComment(source, idx)) continue;
+            // Detect strings/char literals: walk char from line start; skip if inside.
+            if (insideStringOrChar(source, idx)) continue;
+        }
+        switch (c) {
+            ')' => paren_depth += 1,
+            ']' => bracket_depth += 1,
+            '}' => brace_depth += 1,
+            '(' => {
+                if (paren_depth == 0 and bracket_depth == 0 and brace_depth == 0) {
+                    open_paren_off = @intCast(idx);
+                    break;
+                }
+                paren_depth -= 1;
+            },
+            '[' => bracket_depth -= 1,
+            '{' => brace_depth -= 1,
+            ',' => {
+                if (paren_depth == 0 and bracket_depth == 0 and brace_depth == 0) {
+                    commas_at_depth += 1;
+                }
+            },
+            else => {},
+        }
+    }
+    const open_off = open_paren_off orelse return null;
+
+    // The callee identifier is the token immediately preceding `(` (after
+    // skipping whitespace). We do not currently support `a.b(` chains —
+    // resolve only when the prefix is a bare ident.
+    var k: isize = @as(isize, @intCast(open_off)) - 1;
+    while (k >= 0) : (k -= 1) {
+        const c = source[@intCast(k)];
+        if (c == ' ' or c == '\t' or c == '\r' or c == '\n') continue;
+        break;
+    }
+    if (k < 0) return null;
+    const end_idx: u32 = @intCast(@as(isize, k) + 1);
+    if (end_idx == 0) return null;
+    if (!compiler.token.identCont(source[end_idx - 1])) return null;
+    var start_idx: u32 = end_idx - 1;
+    while (start_idx > 0 and compiler.token.identCont(source[start_idx - 1])) start_idx -= 1;
+    if (!compiler.token.identStart(source[start_idx])) return null;
+    return .{
+        .callee = source[start_idx..end_idx],
+        .active_param = commas_at_depth,
+    };
+}
+
+/// True if `idx` falls inside a `// ...` line comment.
+fn insideLineComment(source: []const u8, idx: usize) bool {
+    // Find the start of `idx`'s line.
+    var line_start: usize = idx;
+    while (line_start > 0 and source[line_start - 1] != '\n') line_start -= 1;
+    // Scan forward, respecting string/char literals, looking for `//`.
+    var p = line_start;
+    var in_str: ?u8 = null; // active quote char, or null
+    while (p < idx) : (p += 1) {
+        const c = source[p];
+        if (in_str) |q| {
+            if (c == '\\' and p + 1 < idx) {
+                p += 1;
+                continue;
+            }
+            if (c == q) in_str = null;
+            continue;
+        }
+        if (c == '"' or c == '\'') {
+            in_str = c;
+            continue;
+        }
+        if (c == '/' and p + 1 < source.len and source[p + 1] == '/') {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// True if `idx` falls inside a `"..."` string literal or `'.'` char literal
+/// on its line. Heuristic: scan from the line start counting unescaped quote
+/// runs. We bail (`return false`) on `//` so commented quotes don't toggle.
+fn insideStringOrChar(source: []const u8, idx: usize) bool {
+    var line_start: usize = idx;
+    while (line_start > 0 and source[line_start - 1] != '\n') line_start -= 1;
+    var p = line_start;
+    var in_str: ?u8 = null;
+    while (p < idx) : (p += 1) {
+        const c = source[p];
+        if (in_str) |q| {
+            if (c == '\\' and p + 1 < idx) {
+                p += 1;
+                continue;
+            }
+            if (c == q) in_str = null;
+            continue;
+        }
+        if (c == '/' and p + 1 < source.len and source[p + 1] == '/') return false;
+        if (c == '"' or c == '\'') {
+            in_str = c;
+            continue;
+        }
+    }
+    return in_str != null;
+}
+
+/// Build the JSON `result` payload (SignatureHelp object or "null") for a
+/// signatureHelp request at (line, character) over `source`. Returns "null"
+/// when the cursor is not inside a call expression or the callee does not
+/// match a top-level fn declaration in the parsed file.
+fn buildSignatureHelp(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    line: usize,
+    character: usize,
+) ![]u8 {
+    const off = posToOffset(source, line, character) orelse return allocator.dupe(u8, "null");
+    const ctx = findCallContext(source, off) orelse return allocator.dupe(u8, "null");
+
+    var diags = compiler.Diagnostics.init(allocator);
+    defer diags.deinit();
+    var arena = compiler.ast.Arena.init(allocator);
+    defer arena.deinit();
+    const file = compiler.parseSource(allocator, source, &arena, &diags) catch {
+        return allocator.dupe(u8, "null");
+    };
+
+    // Locate the matching fn (top-level only — methods on receivers are
+    // intentionally out of scope).
+    var match_sig: ?compiler.ast.FnSig = null;
+    for (file.decls) |decl| {
+        switch (decl) {
+            .fn_decl => |fd| if (std.mem.eql(u8, fd.sig.name, ctx.callee)) {
+                match_sig = fd.sig;
+                break;
+            },
+            else => {},
+        }
+    }
+    const sig = match_sig orelse return allocator.dupe(u8, "null");
+
+    // Build the human-readable label:  name(p1: T1, p2: T2) ReturnType
+    var label_buf = std.ArrayList(u8){};
+    defer label_buf.deinit(allocator);
+    try label_buf.appendSlice(allocator, sig.name);
+    try label_buf.append(allocator, '(');
+
+    // Per-parameter labels (strings) for the SignatureInformation.parameters
+    // array. We also accumulate them into the overall label.
+    var param_labels = std.ArrayList([]u8){};
+    defer {
+        for (param_labels.items) |pl| allocator.free(pl);
+        param_labels.deinit(allocator);
+    }
+    for (sig.params, 0..) |prm, i| {
+        if (i > 0) try label_buf.appendSlice(allocator, ", ");
+        const pl = try formatParamLabel(allocator, prm);
+        try label_buf.appendSlice(allocator, pl);
+        try param_labels.append(allocator, pl);
+    }
+    try label_buf.append(allocator, ')');
+    if (sig.return_type.len > 0) {
+        try label_buf.append(allocator, ' ');
+        try label_buf.appendSlice(allocator, sig.return_type);
+    }
+
+    const label_json = try jsonStringify(allocator, label_buf.items);
+    defer allocator.free(label_json);
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    try out.appendSlice(allocator, "{\"signatures\":[{\"label\":");
+    try out.appendSlice(allocator, label_json);
+    try out.appendSlice(allocator, ",\"parameters\":[");
+    for (param_labels.items, 0..) |pl, i| {
+        if (i > 0) try out.append(allocator, ',');
+        const pl_json = try jsonStringify(allocator, pl);
+        defer allocator.free(pl_json);
+        try out.appendSlice(allocator, "{\"label\":");
+        try out.appendSlice(allocator, pl_json);
+        try out.append(allocator, '}');
+    }
+    try out.appendSlice(allocator, "]}],\"activeSignature\":0,\"activeParameter\":");
+    // Clamp active_param to the valid parameter range (LSP clients otherwise
+    // sometimes ignore the result; an extra trailing comma is benign).
+    const clamped: u32 = if (sig.params.len == 0)
+        0
+    else if (ctx.active_param >= sig.params.len)
+        @intCast(sig.params.len - 1)
+    else
+        ctx.active_param;
+    const ap = try std.fmt.allocPrint(allocator, "{d}", .{clamped});
+    defer allocator.free(ap);
+    try out.appendSlice(allocator, ap);
+    try out.append(allocator, '}');
+    return out.toOwnedSlice(allocator);
+}
+
+/// Render one Param as `name: type` for SignatureHelp display. Returns an
+/// owned slice the caller must free.
+fn formatParamLabel(allocator: std.mem.Allocator, prm: compiler.ast.Param) ![]u8 {
+    return switch (prm.mode) {
+        .plain => try std.fmt.allocPrint(allocator, "{s}: {s}", .{ prm.name, prm.type_text }),
+        .comptime_plain => try std.fmt.allocPrint(allocator, "comptime {s}: {s}", .{ prm.name, prm.type_text }),
+        .impl_trait => try std.fmt.allocPrint(allocator, "{s}: impl {s}", .{ prm.name, prm.type_text }),
+        .dyn_trait => try std.fmt.allocPrint(allocator, "{s}: dyn {s}", .{ prm.name, prm.type_text }),
+        .nullable_dyn_trait => try std.fmt.allocPrint(allocator, "{s}: ?dyn {s}", .{ prm.name, prm.type_text }),
+        .any_type => try std.fmt.allocPrint(allocator, "{s}: anytype", .{prm.name}),
+    };
 }
 
 fn onReferences(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
@@ -3295,4 +3737,109 @@ test "buildSemanticTokens returns [] on empty source" {
     const out = try buildSemanticTokens(a, "");
     defer a.free(out);
     try std.testing.expectEqualStrings("[]", out);
+}
+
+test "buildTypeDefinition resolves a same-file param type" {
+    const a = std.testing.allocator;
+    const src =
+        \\struct Counter { n: usize }
+        \\fn f(c: Counter) void { _ = c; }
+        \\
+    ;
+    // Cursor lands on the `c` parameter binding (line 1, char 5).
+    const out = try buildTypeDefinition(a, src, "file:///x.zpp", 1, 5);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"uri\":\"file:///x.zpp\"") != null);
+    // The Counter decl is on line 0.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"start\":{\"line\":0") != null);
+}
+
+test "buildTypeDefinition strips `*` and `[]const ` prefixes" {
+    const a = std.testing.allocator;
+    const src =
+        \\struct Counter { n: usize }
+        \\fn f(c: *Counter) void { _ = c; }
+        \\
+    ;
+    const out = try buildTypeDefinition(a, src, "file:///x.zpp", 1, 5);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"start\":{\"line\":0") != null);
+}
+
+test "buildTypeDefinition returns null for unknown type" {
+    const a = std.testing.allocator;
+    const src = "fn f(c: Nope) void { _ = c; }\n";
+    const out = try buildTypeDefinition(a, src, "file:///x.zpp", 0, 5);
+    defer a.free(out);
+    try std.testing.expectEqualStrings("null", out);
+}
+
+test "buildTypeDefinition returns null when off identifier" {
+    const a = std.testing.allocator;
+    const src = "fn f(c: Foo) void {}\n";
+    // Position is on the space before `c`.
+    const out = try buildTypeDefinition(a, src, "file:///x.zpp", 0, 4);
+    defer a.free(out);
+    try std.testing.expectEqualStrings("null", out);
+}
+
+test "buildSignatureHelp reports activeParameter after a comma" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn f(a: u32, b: u32) u32 { return a + b; }
+        \\pub fn main() void {
+        \\    _ = f(1, );
+        \\}
+    ;
+    // Cursor sits right after `1, ` at line 2, character 13 (after the space).
+    const out = try buildSignatureHelp(a, src, 2, 13);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"activeParameter\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"label\":\"f(a: u32, b: u32) u32\"") != null);
+    // Parameter array has both entries.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"label\":\"a: u32\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"label\":\"b: u32\"") != null);
+}
+
+test "buildSignatureHelp returns null when not inside a call" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn f(a: u32) u32 { return a; }
+        \\pub fn main() void {
+        \\    const x = 1;
+        \\    _ = x;
+        \\}
+    ;
+    // Cursor on the `1` literal — no enclosing call.
+    const out = try buildSignatureHelp(a, src, 2, 14);
+    defer a.free(out);
+    try std.testing.expectEqualStrings("null", out);
+}
+
+test "buildSignatureHelp counts active param across nested call" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn h(a: u32, b: u32) u32 { return a + b; }
+        \\fn g(a: u32, b: u32) u32 { return a + b; }
+        \\pub fn main() void {
+        \\    _ = g(h(1, 2), );
+        \\}
+    ;
+    // Cursor sits inside `g(h(1, 2), |)` after the comma at the outer depth.
+    // Line 3, character 19 lands right after the trailing space following `,`.
+    const out = try buildSignatureHelp(a, src, 3, 19);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"label\":\"g(a: u32, b: u32) u32\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"activeParameter\":1") != null);
+}
+
+test "bareTypeName strips pointer / slice / optional prefixes" {
+    try std.testing.expectEqualStrings("Counter", bareTypeName("Counter").?);
+    try std.testing.expectEqualStrings("Counter", bareTypeName("*Counter").?);
+    try std.testing.expectEqualStrings("Counter", bareTypeName("?*Counter").?);
+    try std.testing.expectEqualStrings("u8", bareTypeName("[]const u8").?);
+    try std.testing.expectEqualStrings("Foo", bareTypeName("[]Foo").?);
+    try std.testing.expectEqualStrings("Foo", bareTypeName("?[]Foo").?);
+    try std.testing.expect(bareTypeName("") == null);
+    try std.testing.expect(bareTypeName("***") == null);
 }

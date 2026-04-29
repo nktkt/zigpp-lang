@@ -32,6 +32,20 @@ official Zig extension.
 - **Go to definition** (`textDocument/definition`): jump from a use of a
   top-level identifier to its declaration in the same file. Cross-file
   resolution and method-on-receiver resolution are not implemented yet.
+- **Go to type definition** (`textDocument/typeDefinition`): with the
+  cursor on a `fn` parameter binding, jump to the declaration of its
+  type. Strips leading `*`, `?`, `[]const `, `[]` prefixes before
+  resolving against the same-file decl table. Locals, receivers, and
+  cross-file resolution are not implemented yet.
+- **Signature help** (`textDocument/signatureHelp`): inside a call
+  expression, the server walks back to the open `(` (balancing nested
+  parens / brackets / braces and skipping strings, char literals, and
+  `//` comments), looks up the callee against the same-file fn table,
+  and returns a single SignatureInformation with one
+  ParameterInformation per `<name>: <type>` plus a 0-based
+  `activeParameter` derived from the unbalanced commas before the
+  cursor. Trigger characters are `(` and `,`. Method-on-receiver and
+  overloaded signatures are not implemented yet.
 - **Find all references** (`textDocument/references`): list every same-file
   occurrence of the identifier under the cursor, skipping string literals,
   char literals, and `//` line comments. Honours `includeDeclaration`.
@@ -147,7 +161,10 @@ code --install-extension zigpp-0.1.0.vsix
   `zpp` parser/sema and supports `textDocument/formatting`,
   `textDocument/hover`, `textDocument/documentSymbol` (Outline view), a
   context-free `textDocument/completion` (keywords + top-level decl names),
-  same-file `textDocument/definition`, same-file `textDocument/references`,
+  same-file `textDocument/definition`, same-file
+  `textDocument/typeDefinition` (param-binding -> decl of its type),
+  same-file `textDocument/signatureHelp` (single SignatureInformation
+  for the enclosing call's callee), same-file `textDocument/references`,
   `workspace/symbol` over open documents, same-file
   `textDocument/rename` (top-level decl names only),
   `textDocument/codeAction` (quick-fix `Explain Z####` per diagnostic
@@ -155,7 +172,9 @@ code --install-extension zigpp-0.1.0.vsix
   Z0040), and `textDocument/semanticTokens/{full,range,full/delta}`
   (full, viewport-restricted, and incremental highlighting).
   Cross-file go-to-definition, cross-file references, cross-file
-  rename, rename of parameters / locals / method names, workspace
+  rename, rename of parameters / locals / method names,
+  type-definition for locals / receivers, signature help for
+  method-on-receiver calls and overloaded signatures, workspace
   search across un-opened files, context-aware completion,
   method-on-receiver navigation, and auto-fix code actions for the
   remaining diagnostic codes (Z0020, Z0021, Z0030, Z0050, Z0060) are
