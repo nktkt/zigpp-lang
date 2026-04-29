@@ -78,13 +78,15 @@ zpp lower examples/hello_trait.zpp
   - `extern interface Foo { ... }` → C-ABI (`extern struct Foo_ABI` with `callconv(.c)`)
 - **`using x = expr;`** — explicit RAII binder, lowers to `var x = expr; defer x.deinit();`
 - **`owned struct`** — must-deinit checked by sema; missing `deinit` → diagnostic Z0010
-- **`own var x`** + **`move x`** — affine ownership with use-after-move detection (Z0020)
+- **`own var x`** + **`move x`** — affine ownership with use-after-move detection (Z0020) and a multi-borrow + block-scope-aware borrow checker (Z0021)
 - **`requires(cond)` / `ensures(cond)`** — runtime contracts via `zpp.contract.*`; `ensures` runs on every scope exit via `defer`
-- **`effects(.noalloc)`** — sema lint that flags allocator usage in pure functions (Z0030)
+- **`effects(.noalloc)` / `.noio` / `.nopanic` / `.nocustom("X")`** — bottom-up effect inference. A fn that calls `a.alloc(...)` is inferred `.alloc`; declaring `.noalloc` on a fn whose inferred set contains `.alloc` fires Z0030. User-defined `.custom("X")` effects propagate one round through same-file callees (Z0060). `@effectsOf(f)` exposes the inferred set as a comptime `[]const u8`.
 - **`derive(.{ Hash, Eq, Ord, Default, Clone, Debug, Json, Iterator, Serialize, Compare, FromStr })`** — comptime helpers injected as struct methods so `a.hash()`, `User.eq(a, b)`, `a.iter()`, `a.serialize(arena)`, `User.fromStr(s, arena)`, and `User.lt(a, b)` work directly
 - **`where T: Trait`** — generic constraint syntax (informational, drops at lowering)
-- **End-to-end pipeline** verified: 8 example programs compile and run through `zpp run` AND `zig build e2e`
-- **Fuzz-clean**: 83,000 generated/mutated inputs through the parser/sema/lowerer with zero panics, leaks, or timeouts
+- **`\\`-prefixed multi-line strings** — pass through to lowered Zig verbatim, just like the underlying `\\` syntax
+- **End-to-end pipeline** verified: 10+ example programs compile and run through `zpp run` AND `zig build e2e`
+- **Fuzz-clean**: 83,000+ generated/mutated inputs through the parser/sema/lowerer with zero panics, leaks, or timeouts
+- **Full IDE feature set via `zpp-lsp`**: hover-with-explain, go-to-definition, find references, workspace symbol search, rename, document symbol (Outline view), keyword + decl-name completion, code-action quick-fixes (Explain Z####), and semantic tokens (`/full`, `/range`, and `/full/delta`)
 
 ## Layout
 
@@ -175,8 +177,14 @@ cd vscode && npm install && npm run compile
 # Then F5 in VS Code, or package with `vsce package` and install the .vsix
 ```
 
-The extension provides syntax highlighting (TextMate grammar), diagnostics
-via `zpp-lsp`, and `Zig++: Run File` / `Zig++: Show Lowered Zig` commands.
+The extension provides syntax highlighting (TextMate + LSP semantic
+tokens), diagnostics, completion, hover-with-explain, go-to-definition,
+find references, workspace symbol search, rename, Outline view, code
+actions, and `Zig++: Run File` / `Zig++: Show Lowered Zig` commands.
+
+Other LSP clients (Vim/Neovim, Emacs, Helix) can point directly at the
+`zpp-lsp` binary on stdio — every IDE-side feature above ships from the
+language server, so the same affordances are available outside VS Code.
 
 ## Philosophy
 
@@ -191,9 +199,11 @@ for syntax and lowering rules.
 
 ## Roadmap
 
-Phased. See [ROADMAP.md](ROADMAP.md). Today the core (Phases 0–4) is
-working end-to-end; Phase 5 (effect inference) and Phase 7 (real
-concurrency) remain.
+Phased. See [ROADMAP.md](ROADMAP.md) and [docs/src/v0.2-plan.md](docs/src/v0.2-plan.md).
+Today the core (Phases 0–4) is working end-to-end. Phase 5 (effect
+inference) is **landed in five rounds**: `.alloc`, `.io`, `.panic`,
+`@effectsOf(f)` queryable, and `.custom("X")` user-defined effects.
+Phase 7 (real concurrency) is the active TaskGroup runtime.
 
 ## Contributing
 
