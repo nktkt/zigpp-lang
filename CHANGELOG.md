@@ -4,6 +4,20 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.20](https://github.com/nktkt/zigpp-lang/compare/v0.1.19...v0.1.20) (2026-04-29)
+
+
+### Features
+
+* **sema:** Z0030 effect inference (MVP) ([68fc4e1](https://github.com/nktkt/zigpp-lang/commit/68fc4e1fe1f2f195ea49126823f0470719da0e1d))
+* **sema:** Z0030 effect inference for .noalloc annotation ([e0e6593](https://github.com/nktkt/zigpp-lang/commit/e0e65936dbb020267360c31405dd161972b77cc4))
+
+
+### Documentation
+
+* **examples:** borrow_check — demonstrates Z0021 ([85eb854](https://github.com/nktkt/zigpp-lang/commit/85eb85439b2f2b7b239a7841fe0cf2aefaf4aa82))
+* **examples:** borrow_check — demonstrates Z0021 ([9d1ac7a](https://github.com/nktkt/zigpp-lang/commit/9d1ac7a1f30e26c00568d10d873f7d21728f8b47))
+
 ## [0.1.19](https://github.com/nktkt/zigpp-lang/compare/v0.1.18...v0.1.19) (2026-04-29)
 
 
