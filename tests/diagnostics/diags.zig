@@ -185,3 +185,35 @@ test "Z0030: noalloc fn that transitively allocates fires once" {
     }
     try std.testing.expectEqual(@as(usize, 1), z0030_count);
 }
+
+// --- Z0030 .io effect inference (round 2) ---
+
+test "Z0030: noio annotation matches inference does not fire" {
+    // `helper` is a pure arithmetic fn and `quiet` only calls it. Neither
+    // touches the IO heuristic substrings, so inference agrees with the
+    // `.noio` annotation and Z0030 must not fire.
+    const a = std.testing.allocator;
+    const src =
+        \\fn helper(x: i32) i32 { return x + 1; }
+        \\effects(.noio) fn quiet(x: i32) i32 {
+        \\    return helper(x) * 2;
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(!hasCode(&result.diags, "Z0030"));
+}
+
+test "Z0030: noio fn that does IO fires" {
+    // `noisy` declares .noio but the body literally contains
+    // `std.debug.print`, which is in the IO heuristic. Z0030 must fire.
+    const a = std.testing.allocator;
+    const src =
+        \\effects(.noio) fn noisy() void {
+        \\    std.debug.print("hi\n", .{});
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(hasCode(&result.diags, "Z0030"));
+}

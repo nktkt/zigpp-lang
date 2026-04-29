@@ -634,6 +634,8 @@ pub const Parser = struct {
                 .noalloc
             else if (std.mem.eql(u8, text, "io"))
                 .io
+            else if (std.mem.eql(u8, text, "noio"))
+                .noio
             else if (std.mem.eql(u8, text, "panic"))
                 .panic
             else

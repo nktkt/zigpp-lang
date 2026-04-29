@@ -43,6 +43,7 @@ pub const Sema = struct {
         try self.checkParams(file, &result);
         try self.checkFunctions(file, &result);
         try self.checkEffectInference(file);
+        try self.checkIoEffectInference(file);
 
         return result;
     }
@@ -553,6 +554,126 @@ pub const Sema = struct {
             }
         }
     }
+
+    /// Round 2 of the effect-inference MVP: same shape as
+    /// `checkEffectInference` but for the `.io` / `.noio` pair instead of
+    /// `.alloc` / `.noalloc`. Kept as a parallel pass (rather than fused with
+    /// the `.alloc` pass) so the existing wiring is unchanged.
+    ///
+    /// Heuristic for "direct IO": the body text contains any of these
+    /// substrings (after stripping strings / chars / `//` comments):
+    ///   `std.debug.print`, `std.fs.`, `std.io.`, `std.process.`,
+    ///   `std.net.`, `std.os.`, `std.posix.`, `try writer.`, `.writeAll(`,
+    ///   `.writeLine(`, `.print(`, `.read(`, `.openFile(`, `.createFile(`.
+    /// The set is intentionally narrow — broaden in a follow-up PR, not
+    /// here.
+    fn checkIoEffectInference(self: *Sema, file: *const ast.File) !void {
+        var fns: std.ArrayList(*const ast.FnDecl) = .{};
+        defer fns.deinit(self.allocator);
+        for (file.decls) |*d| {
+            switch (d.*) {
+                .fn_decl => |*fd| try fns.append(self.allocator, fd),
+                .impl_block => |ib| for (ib.fns) |*fd| try fns.append(self.allocator, fd),
+                .owned_struct => |os| for (os.fns) |*fd| try fns.append(self.allocator, fd),
+                .struct_decl => |sd| for (sd.fns) |*fd| try fns.append(self.allocator, fd),
+                else => {},
+            }
+        }
+        if (fns.items.len == 0) return;
+
+        var name_to_idx = std.StringHashMap(usize).init(self.allocator);
+        defer name_to_idx.deinit();
+        for (fns.items, 0..) |fd, i| {
+            const gop = try name_to_idx.getOrPut(fd.sig.name);
+            if (!gop.found_existing) gop.value_ptr.* = i;
+        }
+
+        const N = fns.items.len;
+        const direct = try self.allocator.alloc(bool, N);
+        defer self.allocator.free(direct);
+        const direct_span = try self.allocator.alloc(diag.Span, N);
+        defer self.allocator.free(direct_span);
+        const inferred = try self.allocator.alloc(bool, N);
+        defer self.allocator.free(inferred);
+
+        const calls = try self.allocator.alloc(std.ArrayList(usize), N);
+        defer {
+            for (calls) |*c| c.deinit(self.allocator);
+            self.allocator.free(calls);
+        }
+        for (calls) |*c| c.* = .{};
+
+        for (fns.items, 0..) |fd, i| {
+            direct[i] = false;
+            direct_span[i] = fd.sig.span;
+            inferred[i] = false;
+            const body = fd.body orelse continue;
+            for (body.stmts) |s| {
+                const text = switch (s) {
+                    .raw => |r| r.text,
+                    .using_stmt => |u| u.init_text,
+                    .own_decl => |o| o.init_text,
+                    else => continue,
+                };
+                if (!direct[i] and bodyDoesIO(text)) {
+                    direct[i] = true;
+                    direct_span[i] = switch (s) {
+                        .raw => |r| r.span,
+                        .using_stmt => |u| u.span,
+                        .own_decl => |o| o.span,
+                        else => unreachable,
+                    };
+                }
+                try collectLocalCalls(text, &name_to_idx, &calls[i], self.allocator);
+            }
+            inferred[i] = direct[i];
+        }
+
+        var changed = true;
+        var rounds: usize = 0;
+        while (changed and rounds < N + 1) : (rounds += 1) {
+            changed = false;
+            for (fns.items, 0..) |_, i| {
+                if (inferred[i]) continue;
+                for (calls[i].items) |cid| {
+                    if (inferred[cid]) {
+                        inferred[i] = true;
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        for (fns.items, 0..) |fd, i| {
+            const ef = fd.sig.effects orelse continue;
+            var declared_noio = false;
+            for (ef.effects) |e| {
+                if (e.kind == .noio) declared_noio = true;
+            }
+            if (!declared_noio) continue;
+            if (!inferred[i]) continue;
+
+            const span = if (direct[i]) direct_span[i] else fd.sig.span;
+            if (direct[i]) {
+                try self.diags.emit(
+                    .err,
+                    .z0030_effect_violation,
+                    span,
+                    "fn '{s}' declared .noio but inferred .io effect",
+                    .{fd.sig.name},
+                );
+            } else {
+                try self.diags.emit(
+                    .err,
+                    .z0030_effect_violation,
+                    span,
+                    "fn '{s}' declared .noio but inferred .io effect (transitively via a callee)",
+                    .{fd.sig.name},
+                );
+            }
+        }
+    }
 };
 
 /// Heuristic: does `text` look like an allocator-using call? We check for
@@ -614,6 +735,70 @@ fn bodyAllocates(text: []const u8) bool {
                 {
                     return true;
                 }
+            }
+        }
+        i += 1;
+    }
+    return false;
+}
+
+/// Heuristic for "this body performs IO": scan `text` for any of the
+/// substrings below, after stripping string / char literals and `//` line
+/// comments. The set is intentionally narrow — keep it documented next to
+/// the docs/src/v0.2-plan.md "Effect inference" section before adding more.
+///
+///   `std.debug.print`, `std.fs.`, `std.io.`, `std.process.`, `std.net.`,
+///   `std.os.`, `std.posix.`, `try writer.`, `.writeAll(`, `.writeLine(`,
+///   `.print(`, `.read(`, `.openFile(`, `.createFile(`.
+fn bodyDoesIO(text: []const u8) bool {
+    const needles = [_][]const u8{
+        "std.debug.print",
+        "std.fs.",
+        "std.io.",
+        "std.process.",
+        "std.net.",
+        "std.os.",
+        "std.posix.",
+        "try writer.",
+        ".writeAll(",
+        ".writeLine(",
+        ".print(",
+        ".read(",
+        ".openFile(",
+        ".createFile(",
+    };
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = text[i];
+        // Skip over double-quoted string literals.
+        if (c == '"') {
+            i += 1;
+            while (i < text.len) : (i += 1) {
+                if (text[i] == '\\' and i + 1 < text.len) { i += 1; continue; }
+                if (text[i] == '"') { i += 1; break; }
+            }
+            continue;
+        }
+        // Skip over char literals.
+        if (c == '\'') {
+            i += 1;
+            while (i < text.len and text[i] != '\'') : (i += 1) {
+                if (text[i] == '\\' and i + 1 < text.len) i += 1;
+            }
+            if (i < text.len) i += 1;
+            continue;
+        }
+        // Skip over `//` line comments.
+        if (c == '/' and i + 1 < text.len and text[i + 1] == '/') {
+            while (i < text.len and text[i] != '\n') i += 1;
+            continue;
+        }
+        // Try every substring at this position.
+        inline for (needles) |needle| {
+            if (i + needle.len <= text.len and
+                std.mem.eql(u8, text[i .. i + needle.len], needle))
+            {
+                return true;
             }
         }
         i += 1;
