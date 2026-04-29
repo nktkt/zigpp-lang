@@ -112,9 +112,11 @@ calls anything that allocates).
 {{#include ./output/async_group.txt}}
 ```
 
-`zpp.async_mod.TaskGroup` is the MVP serial executor — `spawn`
-schedules, `join` runs to completion. Every primitive is explicit;
-there is no implicit await.
+`zpp.async_mod.TaskGroup` is a real concurrent executor: each
+`spawn` launches an OS thread immediately and returns a typed
+`*JoinHandle(T)`; `join` waits on every worker and propagates the
+first error after setting the group's `CancellationToken`. Every
+primitive is explicit; there is no implicit await.
 
 ## event_bus.zpp — integration showcase
 
