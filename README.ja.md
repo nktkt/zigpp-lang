@@ -151,7 +151,7 @@ exe.root_module.addImport("zpp", zpp_dep.module("zpp"));
 ```
 
 ランタイムは `Dyn`、`Owned`、`ArenaScope`、`contract.requires`、
-`derive.Hash/Eq/Debug/Json`、async の `TaskGroup` (scaffold) を公開しています。
+`derive.Hash/Eq/Debug/Json`、`std.Thread` ベースの並行 `TaskGroup` と型付き `JoinHandle(T)` を公開しています。
 コンパイラフロントエンドも `zpp_compiler` として import 可能で、lowering
 パイプラインをプログラムに組み込めます。
 

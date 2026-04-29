@@ -161,9 +161,10 @@ exe.root_module.addImport("zpp", zpp_dep.module("zpp"));
 ```
 
 The runtime exposes `Dyn`, `Owned`, `ArenaScope`, `contract.requires`,
-`derive.Hash/Eq/Debug/Json`, and the async `TaskGroup` scaffold. The
-compiler frontend is also importable as `zpp_compiler` if you need to
-embed the lowering pipeline programmatically.
+`derive.Hash/Eq/Debug/Json`, and a `std.Thread`-backed concurrent
+`TaskGroup` with typed `JoinHandle(T)`. The compiler frontend is also
+importable as `zpp_compiler` if you need to embed the lowering pipeline
+programmatically.
 
 ## Editor support
 
