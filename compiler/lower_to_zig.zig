@@ -35,7 +35,7 @@ pub const Lowerer = struct {
     /// and Z0050 is suppressed (we have no table to check against).
     inferred_effects: ?*const InferredEffectsMap = null,
     /// Per-fn inferred `.custom("X")` name set, supplied by sema.
-    /// Sibling to `inferred_effects`; appended after the alloc/io/panic
+    /// Sibling to `inferred_effects`; appended after the alloc/io/panic/async
     /// axes so the lowered string keeps backwards compatibility (a fn
     /// with no custom effects produces the exact same shape as before).
     /// Optional for the same reasons as `inferred_effects`.
@@ -69,8 +69,8 @@ pub const Lowerer = struct {
 
     /// Same as `initWithEffects` but also wires the per-fn `.custom("X")`
     /// table so the `@effectsOf(<ident>)` substitution can append the
-    /// `custom("X")` entries after the alloc/io/panic axes. Pass the map
-    /// straight from `sema.SemaResult.inferred_custom_effects`.
+    /// `custom("X")` entries after the alloc/io/panic/async axes. Pass the
+    /// map straight from `sema.SemaResult.inferred_custom_effects`.
     pub fn initWithEffectsAndCustom(
         allocator: std.mem.Allocator,
         diags: *diag.Diagnostics,
@@ -441,10 +441,11 @@ pub const Lowerer = struct {
 
     /// Look up `ident` in the per-fn inferred-effect table and write a
     /// double-quoted comma-separated literal (e.g. `"alloc,io"`, `""` for
-    /// pure). Order is fixed (alloc, io, panic) so the produced string is
-    /// stable and trivially comparable in user comptime. Unknown idents
-    /// emit `""` and a Z0050 diagnostic; a missing table (e.g. snapshot
-    /// tests that bypass sema) silently emits `""`.
+    /// pure). Order is fixed (alloc, io, panic, async, custom("X")...) so
+    /// the produced string is stable and trivially comparable in user
+    /// comptime. Unknown idents emit `""` and a Z0050 diagnostic; a
+    /// missing table (e.g. snapshot tests that bypass sema) silently
+    /// emits `""`.
     fn writeEffectsOfFor(self: *Lowerer, ident: []const u8) !void {
         const map = self.inferred_effects orelse {
             try self.write("\"\"");
@@ -477,7 +478,12 @@ pub const Lowerer = struct {
             try self.write("panic");
             first = false;
         }
-        // Append `custom("X")` entries (if any) after the alloc/io/panic
+        if (entry.@"async") {
+            if (!first) try self.write(",");
+            try self.write("async");
+            first = false;
+        }
+        // Append `custom("X")` entries (if any) after the alloc/io/panic/async
         // axes. The order matches the sibling map's insertion order so
         // the lowered string stays stable across runs. The leading axes
         // are unchanged when no custom effects are present, which keeps
@@ -569,8 +575,8 @@ pub const Lowerer = struct {
     /// Rewrite a chunk of raw user code, applying the same Zig++ -> Zig
     /// substitutions as `writeRewrittenType` plus statement-level forms:
     ///   `move x` -> `x`
-    ///   `@effectsOf(<ident>)` -> `"alloc,io,panic"` literal (effects sema
-    ///                            inferred for the same-file fn `<ident>`)
+    ///   `@effectsOf(<ident>)` -> `"alloc,io,panic,async"` literal (effects
+    ///                            sema inferred for the same-file fn `<ident>`)
     /// String literals and comments are passed through unchanged.
     fn writeRewrittenCode(self: *Lowerer, text: []const u8) !void {
         var i: usize = 0;
@@ -799,7 +805,7 @@ pub fn lowerWithEffects(
 
 /// Same as `lowerWithEffects` but also wires the per-fn `.custom("X")`
 /// table so `@effectsOf(<ident>)` substitutions can append the
-/// `custom("X")` entries after the alloc/io/panic axes.
+/// `custom("X")` entries after the alloc/io/panic/async axes.
 pub fn lowerWithEffectsAndCustom(
     allocator: std.mem.Allocator,
     file: *const ast.File,
