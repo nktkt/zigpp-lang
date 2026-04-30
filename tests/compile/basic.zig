@@ -149,3 +149,30 @@ test "derive(FromStr) emits a fromStr() method" {
     try std.testing.expect(std.mem.indexOf(u8, out, "pub fn fromStr(s: []const u8, allocator: std.mem.Allocator) !@This()") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "zpp.derive.FromStr(@This()).parse") != null);
 }
+
+test "trait default body lowers and impl falls back via vtable" {
+    // A trait with a default-bodied method emits a free fn, and an impl
+    // that omits that method gets the default wired into its vtable slot.
+    const a = std.testing.allocator;
+    const src =
+        \\trait Greeter {
+        \\    fn name(self) []const u8;
+        \\    fn greet(self) []const u8 {
+        \\        return "default";
+        \\    }
+        \\}
+        \\const Hello = struct {};
+        \\impl Greeter for Hello {
+        \\    fn name(self) []const u8 { _ = self; return "Hello"; }
+        \\}
+    ;
+    const out = try lower(a, src);
+    defer a.free(out);
+    // Default fn was emitted with `*anyopaque` self.
+    try std.testing.expect(std.mem.indexOf(u8, out, "fn Greeter_default_greet(self: *anyopaque)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "return \"default\";") != null);
+    // Impl's vtable wires `greet` -> the default fn (since impl omitted it).
+    try std.testing.expect(std.mem.indexOf(u8, out, ".greet = Greeter_default_greet,") != null);
+    // Impl's vtable wires `name` -> the per-impl thunk (impl supplied it).
+    try std.testing.expect(std.mem.indexOf(u8, out, ".name = Greeter_name_for_Hello,") != null);
+}

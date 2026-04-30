@@ -153,11 +153,16 @@ pub const Sema = struct {
                         continue;
                     }
                     // Cross-check that every method declared by the trait is
-                    // present in this impl. Missing methods → Z0040.
+                    // present in this impl. Missing methods → Z0040, but only
+                    // for *required* methods (no default body). Methods that
+                    // carry a default body in the trait are optional in impls;
+                    // their default body is used as fallback at lowering time.
                     const methods = r.trait_methods.get(i.trait_name) orelse continue;
                     var missing: std.ArrayList([]const u8) = .{};
                     defer missing.deinit(self.allocator);
                     for (methods) |m| {
+                        // Skip optional (default-bodied) methods entirely.
+                        if (m.body != null) continue;
                         var found = false;
                         for (i.fns) |fd| {
                             if (std.mem.eql(u8, fd.sig.name, m.name)) {

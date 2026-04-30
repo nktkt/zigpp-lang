@@ -256,11 +256,40 @@ pub const Parser = struct {
         _ = try self.expect(.l_paren, "param list");
         const params = try self.parseParamList();
         const ret_text = try self.parseReturnType();
+
+        // Either `;` (signature only) or `{ ... }` (default body).
+        if (self.check(.l_brace)) {
+            const open = self.advance(); // consume `{`
+            const body_start = open.span.end;
+            var body_end = body_start;
+            var depth: i32 = 1;
+            while (!self.isAtEnd()) {
+                const t = self.peek();
+                switch (t.kind) {
+                    .l_paren, .l_brace, .l_bracket, .dot_brace => depth += 1,
+                    .r_paren, .r_brace, .r_bracket => depth -= 1,
+                    else => {},
+                }
+                if (depth == 0) break;
+                body_end = t.span.end;
+                _ = self.advance();
+            }
+            const close = try self.expect(.r_brace, "trait method body close");
+            return .{
+                .name = name.slice(self.source),
+                .params = params,
+                .return_type = ret_text,
+                .body = self.source[body_start..body_end],
+                .span = .{ .start = start, .end = close.span.end },
+            };
+        }
+
         const semi = try self.expect(.semicolon, "trait method end");
         return .{
             .name = name.slice(self.source),
             .params = params,
             .return_type = ret_text,
+            .body = null,
             .span = .{ .start = start, .end = semi.span.end },
         };
     }
