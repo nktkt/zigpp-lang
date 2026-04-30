@@ -172,6 +172,71 @@ test "Z0040: impl missing trait method" {
     try std.testing.expect(hasCode(&result.diags, "Z0040"));
 }
 
+test "Z0002: structural trait impl missing methods on target type" {
+    // `Greeter` is structural, so the `impl` block is allowed to omit the
+    // `farewell` method (no Z0040). However the `greet` method LISTED in
+    // the impl does not exist on `Friendly` — Z0002 must fire.
+    const a = std.testing.allocator;
+    const src =
+        \\trait Greeter : structural {
+        \\    fn greet(self) void;
+        \\    fn farewell(self) void;
+        \\}
+        \\const Friendly = struct { name: []const u8 };
+        \\impl Greeter for Friendly {
+        \\    fn greet(self) void { _ = self; }
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(hasCode(&result.diags, "Z0002"));
+    // Structural relaxation: Z0040 (missing trait method) must NOT fire.
+    try std.testing.expect(!hasCode(&result.diags, "Z0040"));
+}
+
+test "Z0002: structural impl with matching method on type does not fire" {
+    // Same shape but the struct now declares `greet` directly. The impl
+    // block re-exports a method that exists, and the trait is structural,
+    // so neither Z0002 nor Z0040 should fire.
+    const a = std.testing.allocator;
+    const src =
+        \\trait Greeter : structural {
+        \\    fn greet(self) void;
+        \\    fn farewell(self) void;
+        \\}
+        \\const Friendly = struct {
+        \\    name: []const u8,
+        \\    pub fn greet(self: *@This()) void { _ = self; }
+        \\};
+        \\impl Greeter for Friendly {
+        \\    fn greet(self) void { _ = self; }
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(!hasCode(&result.diags, "Z0002"));
+    try std.testing.expect(!hasCode(&result.diags, "Z0040"));
+}
+
+test "Z0002: structural trait without an impl block is fine" {
+    // Structural traits can be satisfied with no `impl` at all. The
+    // analyzer must not emit anything in that case.
+    const a = std.testing.allocator;
+    const src =
+        \\trait Greeter : structural {
+        \\    fn greet(self) void;
+        \\}
+        \\const Friendly = struct {
+        \\    name: []const u8,
+        \\    pub fn greet(self: *@This()) void { _ = self; }
+        \\};
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(!hasCode(&result.diags, "Z0002"));
+    try std.testing.expect(!hasCode(&result.diags, "Z0040"));
+}
+
 test "Z0040: complete impl produces no diagnostic" {
     const a = std.testing.allocator;
     const src =
