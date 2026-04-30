@@ -95,12 +95,11 @@ fn walkAndDoc(
     written: *usize,
     index_entries: *std.ArrayList(IndexEntry),
 ) !void {
-    const stat = std.fs.cwd().statFile(root) catch |e| {
-        try emitErr("zpp doc: cannot stat '{s}': {s}\n", .{ root, @errorName(e) });
-        return;
-    };
-    if (stat.kind == .directory) {
-        var dir = try std.fs.cwd().openDir(root, .{ .iterate = true });
+    // Try opening as a directory first. On Windows std.fs.statFile raises
+    // error.IsDir for directories, so the previous statFile-then-branch shape
+    // never reached the directory case there.
+    if (std.fs.cwd().openDir(root, .{ .iterate = true })) |dir_const| {
+        var dir = dir_const;
         defer dir.close();
         var walker = try dir.walk(allocator);
         defer walker.deinit();
@@ -111,9 +110,17 @@ fn walkAndDoc(
             defer allocator.free(full);
             try docOne(allocator, full, entry.path, out_dir, format, written, index_entries);
         }
-    } else {
-        const base = std.fs.path.basename(root);
-        try docOne(allocator, root, base, out_dir, format, written, index_entries);
+        return;
+    } else |open_err| switch (open_err) {
+        error.NotDir => {
+            const base = std.fs.path.basename(root);
+            try docOne(allocator, root, base, out_dir, format, written, index_entries);
+            return;
+        },
+        else => {
+            try emitErr("zpp doc: cannot open '{s}': {s}\n", .{ root, @errorName(open_err) });
+            return;
+        },
     }
 }
 
