@@ -202,7 +202,7 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
 
     if (std.mem.eql(u8, method, "initialize")) {
         const caps =
-            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"typeDefinitionProvider":true,"referencesProvider":true,"workspaceSymbolProvider":true,"renameProvider":{"prepareProvider":true},"completionProvider":{"triggerCharacters":[".",":"]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false},"codeActionProvider":{"codeActionKinds":["quickfix"]},"semanticTokensProvider":{"legend":{"tokenTypes":["keyword","string","number","comment","function","interface","struct","variable"],"tokenModifiers":["declaration"]},"full":{"delta":true},"range":true}},"serverInfo":{"name":"zpp-lsp","version":"0.11.0"}}
+            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"referencesProvider":true,"workspaceSymbolProvider":true,"renameProvider":{"prepareProvider":true},"completionProvider":{"triggerCharacters":[".",":"]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false},"codeActionProvider":{"codeActionKinds":["quickfix"]},"callHierarchyProvider":true,"semanticTokensProvider":{"legend":{"tokenTypes":["keyword","string","number","comment","function","interface","struct","variable"],"tokenModifiers":["declaration"]},"full":{"delta":true},"range":true}},"serverInfo":{"name":"zpp-lsp","version":"0.13.0"}}
         ;
         try writeResult(server.allocator, id_text, caps);
         return;
@@ -290,6 +290,22 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
     }
     if (std.mem.eql(u8, method, "textDocument/semanticTokens/range")) {
         try onSemanticTokensRange(server, id_text, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/implementation")) {
+        try onImplementation(server, id_text, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/prepareCallHierarchy")) {
+        try onPrepareCallHierarchy(server, id_text, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "callHierarchy/incomingCalls")) {
+        try onIncomingCalls(server, id_text, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "callHierarchy/outgoingCalls")) {
+        try onOutgoingCalls(server, id_text, params);
         return;
     }
     if (obj.get("id") != null) {
@@ -2755,6 +2771,698 @@ fn buildSemanticTokensDelta(
         "{{\"resultId\":\"{d}\",\"edits\":{s}}}",
         .{ new_id, body },
     );
+}
+
+fn onImplementation(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    const p = params orelse return writeResult(server.allocator, id_text, "null");
+    if (p != .object) return writeResult(server.allocator, id_text, "null");
+    const td = p.object.get("textDocument") orelse return writeResult(server.allocator, id_text, "null");
+    if (td != .object) return writeResult(server.allocator, id_text, "null");
+    const uri_v = td.object.get("uri") orelse return writeResult(server.allocator, id_text, "null");
+    if (uri_v != .string) return writeResult(server.allocator, id_text, "null");
+    const pos_v = p.object.get("position") orelse return writeResult(server.allocator, id_text, "null");
+    if (pos_v != .object) return writeResult(server.allocator, id_text, "null");
+    const line_v = pos_v.object.get("line") orelse return writeResult(server.allocator, id_text, "null");
+    const char_v = pos_v.object.get("character") orelse return writeResult(server.allocator, id_text, "null");
+    if (line_v != .integer or char_v != .integer) return writeResult(server.allocator, id_text, "null");
+    if (line_v.integer < 0 or char_v.integer < 0) return writeResult(server.allocator, id_text, "null");
+
+    const text = server.docs.get(uri_v.string) orelse {
+        try writeResult(server.allocator, id_text, "null");
+        return;
+    };
+    const allocator = server.allocator;
+    const result = try buildImplementation(
+        allocator,
+        text,
+        uri_v.string,
+        @intCast(line_v.integer),
+        @intCast(char_v.integer),
+    );
+    defer allocator.free(result);
+    try writeResult(server.allocator, id_text, result);
+}
+
+/// Build the JSON `result` payload (a Location[] array or "null") for a
+/// textDocument/implementation lookup. Same-file only.
+///
+/// Behaviour:
+///   - If the cursor identifier matches a `trait` name, returns the
+///     locations of every `impl <Trait> for <T>` block in the file.
+///   - Otherwise, if the identifier matches a struct/owned-struct name,
+///     returns every impl block whose `target_type` matches (the dual
+///     direction: traits implemented by this type).
+///   - Returns "null" when the cursor is off any recognizable name or
+///     no matching impl exists.
+fn buildImplementation(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    uri: []const u8,
+    line: usize,
+    character: usize,
+) ![]u8 {
+    const off = posToOffset(source, line, character) orelse return allocator.dupe(u8, "null");
+    const ident = identAt(source, off) orelse return allocator.dupe(u8, "null");
+
+    var diags = compiler.Diagnostics.init(allocator);
+    defer diags.deinit();
+    var arena = compiler.ast.Arena.init(allocator);
+    defer arena.deinit();
+    const file = compiler.parseSource(allocator, source, &arena, &diags) catch {
+        return allocator.dupe(u8, "null");
+    };
+
+    // Classify the cursor identifier as a trait name, a struct name, or
+    // neither. We pick the first matching top-level decl — same-file scope
+    // means no ambiguity beyond multiple decls with the same name (which
+    // would be an error elsewhere).
+    const Kind = enum { trait, target, none };
+    var kind: Kind = .none;
+    for (file.decls) |decl| {
+        switch (decl) {
+            .trait => |t| if (std.mem.eql(u8, t.name, ident)) {
+                kind = .trait;
+                break;
+            },
+            .owned_struct => |os| if (std.mem.eql(u8, os.name, ident)) {
+                kind = .target;
+                break;
+            },
+            .struct_decl => |sd| if (std.mem.eql(u8, sd.name, ident)) {
+                kind = .target;
+                break;
+            },
+            else => {},
+        }
+    }
+    if (kind == .none) return allocator.dupe(u8, "null");
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    try out.append(allocator, '[');
+    var first = true;
+    const uri_json = try jsonStringify(allocator, uri);
+    defer allocator.free(uri_json);
+
+    for (file.decls) |decl| {
+        const ib = switch (decl) {
+            .impl_block => |i| i,
+            else => continue,
+        };
+        const matches = switch (kind) {
+            .trait => std.mem.eql(u8, ib.trait_name, ident),
+            .target => std.mem.eql(u8, ib.target_type, ident),
+            .none => false,
+        };
+        if (!matches) continue;
+        if (!first) try out.append(allocator, ',');
+        first = false;
+        try out.appendSlice(allocator, "{\"uri\":");
+        try out.appendSlice(allocator, uri_json);
+        try out.appendSlice(allocator, ",\"range\":");
+        try appendRangeJson(&out, allocator, rangeFromSpan(source, ib.span));
+        try out.append(allocator, '}');
+    }
+    if (first) return allocator.dupe(u8, "null");
+    try out.append(allocator, ']');
+    return out.toOwnedSlice(allocator);
+}
+
+/// A function "site" for the call hierarchy: name + selection span (the
+/// identifier itself) + full span (sig start through body close brace, when
+/// present). Used to identify both the target of `prepareCallHierarchy` and
+/// the caller/callee items returned by `incomingCalls` / `outgoingCalls`.
+const FnSite = struct {
+    name: []const u8,
+    /// Span covering just the fn name identifier (selectionRange).
+    selection: compiler.diagnostics.Span,
+    /// Span covering the full fn decl (sig + body if present).
+    full: compiler.diagnostics.Span,
+};
+
+/// Compute the byte span covering the name identifier inside a FnSig.
+/// Falls back to the full sig span when we can't tell — name is borrowed
+/// from the source buffer so its address gives us the byte offset.
+fn fnNameSpan(source: []const u8, sig: compiler.ast.FnSig) compiler.diagnostics.Span {
+    const name_ptr = @intFromPtr(sig.name.ptr);
+    const src_ptr = @intFromPtr(source.ptr);
+    if (name_ptr >= src_ptr and name_ptr < src_ptr + source.len) {
+        const off: u32 = @intCast(name_ptr - src_ptr);
+        return .{ .start = off, .end = off + @as(u32, @intCast(sig.name.len)) };
+    }
+    return sig.span;
+}
+
+/// Compute the full span of a FnDecl: sig start through body close brace
+/// (or sig end when no body). Used as the `range` for CallHierarchyItem.
+fn fnFullSpan(fd: compiler.ast.FnDecl) compiler.diagnostics.Span {
+    const start = fd.sig.span.start;
+    const end = if (fd.body) |b| b.span.end else fd.sig.span.end;
+    return .{ .start = start, .end = end };
+}
+
+/// Walk every FnDecl visible in the file (top-level fns, struct methods,
+/// owned-struct methods, impl-block methods) and append a FnSite to `out`.
+fn collectFnSites(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    file: compiler.ast.File,
+    out: *std.ArrayList(FnSite),
+) !void {
+    for (file.decls) |decl| {
+        switch (decl) {
+            .fn_decl => |fd| try out.append(allocator, .{
+                .name = fd.sig.name,
+                .selection = fnNameSpan(source, fd.sig),
+                .full = fnFullSpan(fd),
+            }),
+            .owned_struct => |os| for (os.fns) |fd| try out.append(allocator, .{
+                .name = fd.sig.name,
+                .selection = fnNameSpan(source, fd.sig),
+                .full = fnFullSpan(fd),
+            }),
+            .struct_decl => |sd| for (sd.fns) |fd| try out.append(allocator, .{
+                .name = fd.sig.name,
+                .selection = fnNameSpan(source, fd.sig),
+                .full = fnFullSpan(fd),
+            }),
+            .impl_block => |ib| for (ib.fns) |fd| try out.append(allocator, .{
+                .name = fd.sig.name,
+                .selection = fnNameSpan(source, fd.sig),
+                .full = fnFullSpan(fd),
+            }),
+            else => {},
+        }
+    }
+}
+
+/// Append a `CallHierarchyItem` JSON object to `out` for the given site.
+fn appendCallHierarchyItem(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    uri_json: []const u8,
+    site: FnSite,
+) !void {
+    const name_json = try jsonStringify(allocator, site.name);
+    defer allocator.free(name_json);
+    try out.appendSlice(allocator, "{\"name\":");
+    try out.appendSlice(allocator, name_json);
+    // SymbolKind 12 = Function (LSP spec).
+    try out.appendSlice(allocator, ",\"kind\":12,\"uri\":");
+    try out.appendSlice(allocator, uri_json);
+    try out.appendSlice(allocator, ",\"range\":");
+    try appendRangeJson(out, allocator, rangeFromSpan(source, site.full));
+    try out.appendSlice(allocator, ",\"selectionRange\":");
+    try appendRangeJson(out, allocator, rangeFromSpan(source, site.selection));
+    try out.append(allocator, '}');
+}
+
+fn onPrepareCallHierarchy(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    const p = params orelse return writeResult(server.allocator, id_text, "null");
+    if (p != .object) return writeResult(server.allocator, id_text, "null");
+    const td = p.object.get("textDocument") orelse return writeResult(server.allocator, id_text, "null");
+    if (td != .object) return writeResult(server.allocator, id_text, "null");
+    const uri_v = td.object.get("uri") orelse return writeResult(server.allocator, id_text, "null");
+    if (uri_v != .string) return writeResult(server.allocator, id_text, "null");
+    const pos_v = p.object.get("position") orelse return writeResult(server.allocator, id_text, "null");
+    if (pos_v != .object) return writeResult(server.allocator, id_text, "null");
+    const line_v = pos_v.object.get("line") orelse return writeResult(server.allocator, id_text, "null");
+    const char_v = pos_v.object.get("character") orelse return writeResult(server.allocator, id_text, "null");
+    if (line_v != .integer or char_v != .integer) return writeResult(server.allocator, id_text, "null");
+    if (line_v.integer < 0 or char_v.integer < 0) return writeResult(server.allocator, id_text, "null");
+
+    const text = server.docs.get(uri_v.string) orelse {
+        try writeResult(server.allocator, id_text, "null");
+        return;
+    };
+    const allocator = server.allocator;
+    const result = try buildPrepareCallHierarchy(
+        allocator,
+        text,
+        uri_v.string,
+        @intCast(line_v.integer),
+        @intCast(char_v.integer),
+    );
+    defer allocator.free(result);
+    try writeResult(server.allocator, id_text, result);
+}
+
+/// Build the JSON `result` payload (a CallHierarchyItem[] or "null") for a
+/// textDocument/prepareCallHierarchy request. Returns the single fn whose
+/// name identifier sits under the cursor — top-level fns plus methods on
+/// structs / owned structs / impl blocks. Returns "null" when the cursor
+/// isn't on any fn name.
+fn buildPrepareCallHierarchy(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    uri: []const u8,
+    line: usize,
+    character: usize,
+) ![]u8 {
+    const off = posToOffset(source, line, character) orelse return allocator.dupe(u8, "null");
+    const ident = identAt(source, off) orelse return allocator.dupe(u8, "null");
+
+    var diags = compiler.Diagnostics.init(allocator);
+    defer diags.deinit();
+    var arena = compiler.ast.Arena.init(allocator);
+    defer arena.deinit();
+    const file = compiler.parseSource(allocator, source, &arena, &diags) catch {
+        return allocator.dupe(u8, "null");
+    };
+
+    var sites: std.ArrayList(FnSite) = .{};
+    defer sites.deinit(allocator);
+    try collectFnSites(allocator, source, file, &sites);
+
+    // Match by name AND by selection span containing the cursor offset, so
+    // that hovering a fn-name use site doesn't accidentally start a call
+    // hierarchy on a same-named sibling decl. We only return the fn whose
+    // selectionRange covers the cursor.
+    for (sites.items) |s| {
+        if (!std.mem.eql(u8, s.name, ident)) continue;
+        if (off < s.selection.start or off >= s.selection.end) continue;
+
+        var out = std.ArrayList(u8){};
+        defer out.deinit(allocator);
+        const uri_json = try jsonStringify(allocator, uri);
+        defer allocator.free(uri_json);
+        try out.append(allocator, '[');
+        try appendCallHierarchyItem(&out, allocator, source, uri_json, s);
+        try out.append(allocator, ']');
+        return out.toOwnedSlice(allocator);
+    }
+    return allocator.dupe(u8, "null");
+}
+
+/// Extract the `item` field from a callHierarchy/{incoming,outgoing}Calls
+/// `params` object. Returns null when the shape doesn't match the spec.
+fn extractCallHierarchyItem(p: std.json.Value) ?struct {
+    name: []const u8,
+    uri: []const u8,
+    selection_line: usize,
+    selection_char: usize,
+} {
+    if (p != .object) return null;
+    const item = p.object.get("item") orelse return null;
+    if (item != .object) return null;
+    const name_v = item.object.get("name") orelse return null;
+    if (name_v != .string) return null;
+    const uri_v = item.object.get("uri") orelse return null;
+    if (uri_v != .string) return null;
+    const sel = item.object.get("selectionRange") orelse return null;
+    if (sel != .object) return null;
+    const start = sel.object.get("start") orelse return null;
+    if (start != .object) return null;
+    const ln = start.object.get("line") orelse return null;
+    const ch = start.object.get("character") orelse return null;
+    if (ln != .integer or ch != .integer) return null;
+    if (ln.integer < 0 or ch.integer < 0) return null;
+    return .{
+        .name = name_v.string,
+        .uri = uri_v.string,
+        .selection_line = @intCast(ln.integer),
+        .selection_char = @intCast(ch.integer),
+    };
+}
+
+fn onIncomingCalls(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    const p = params orelse return writeResult(server.allocator, id_text, "[]");
+    const info = extractCallHierarchyItem(p) orelse {
+        try writeResult(server.allocator, id_text, "[]");
+        return;
+    };
+    const text = server.docs.get(info.uri) orelse {
+        try writeResult(server.allocator, id_text, "[]");
+        return;
+    };
+    const allocator = server.allocator;
+    const result = try buildIncomingCalls(
+        allocator,
+        text,
+        info.uri,
+        info.name,
+        info.selection_line,
+        info.selection_char,
+    );
+    defer allocator.free(result);
+    try writeResult(server.allocator, id_text, result);
+}
+
+/// Build the JSON `result` array (CallHierarchyIncomingCall[]) for a
+/// callHierarchy/incomingCalls request. Same-file only.
+///
+/// Strategy: scan every fn body for whole-word occurrences of `target_name`
+/// outside string / char literals and `//` comments. Group hits by their
+/// enclosing fn (the FnSite whose `full` span contains the hit offset).
+/// Each enclosing fn becomes one `from` entry with `fromRanges` listing
+/// the call-site identifier ranges.
+fn buildIncomingCalls(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    uri: []const u8,
+    target_name: []const u8,
+    target_line: usize,
+    target_character: usize,
+) ![]u8 {
+    var diags = compiler.Diagnostics.init(allocator);
+    defer diags.deinit();
+    var arena = compiler.ast.Arena.init(allocator);
+    defer arena.deinit();
+    const file = compiler.parseSource(allocator, source, &arena, &diags) catch {
+        return allocator.dupe(u8, "[]");
+    };
+
+    var sites: std.ArrayList(FnSite) = .{};
+    defer sites.deinit(allocator);
+    try collectFnSites(allocator, source, file, &sites);
+
+    // Identify the target fn so we can exclude its own selection identifier
+    // from the hit list (the decl site shouldn't count as a self-call). The
+    // client passes the original CallHierarchyItem back, so we match on
+    // (name, selection start) — uniquely identifying the fn even when name
+    // collisions exist across struct methods.
+    const target_off = posToOffset(source, target_line, target_character) orelse 0;
+    var target_idx: ?usize = null;
+    for (sites.items, 0..) |s, i| {
+        if (!std.mem.eql(u8, s.name, target_name)) continue;
+        if (s.selection.start != target_off) continue;
+        target_idx = i;
+        break;
+    }
+
+    // Map: enclosing-fn-idx -> list of call-site spans.
+    const Hit = struct { idx: usize, span: compiler.diagnostics.Span };
+    var hits: std.ArrayList(Hit) = .{};
+    defer hits.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < source.len) {
+        const c = source[i];
+        if (c == '"') {
+            i += 1;
+            while (i < source.len) : (i += 1) {
+                if (source[i] == '\\' and i + 1 < source.len) {
+                    i += 1;
+                    continue;
+                }
+                if (source[i] == '"') {
+                    i += 1;
+                    break;
+                }
+            }
+            continue;
+        }
+        if (c == '\'') {
+            i += 1;
+            while (i < source.len and source[i] != '\'') : (i += 1) {
+                if (source[i] == '\\' and i + 1 < source.len) i += 1;
+            }
+            if (i < source.len) i += 1;
+            continue;
+        }
+        if (c == '/' and i + 1 < source.len and source[i + 1] == '/') {
+            while (i < source.len and source[i] != '\n') i += 1;
+            continue;
+        }
+        if (compiler.token.identStart(c) and (i == 0 or !compiler.token.identCont(source[i - 1]))) {
+            var end: usize = i + 1;
+            while (end < source.len and compiler.token.identCont(source[end])) end += 1;
+            const word = source[i..end];
+            if (std.mem.eql(u8, word, target_name)) {
+                // Find the enclosing fn whose body span contains this hit.
+                // Skip the target's own selection identifier itself.
+                const off_u32: u32 = @intCast(i);
+                var enclosing: ?usize = null;
+                for (sites.items, 0..) |s, idx| {
+                    if (target_idx) |ti| if (ti == idx and off_u32 == s.selection.start) {
+                        enclosing = null;
+                        break;
+                    };
+                    if (off_u32 >= s.full.start and off_u32 < s.full.end) {
+                        // Don't record the fn's own name selection as a call.
+                        if (off_u32 == s.selection.start and std.mem.eql(u8, s.name, target_name) and s.selection.end - s.selection.start == word.len) {
+                            // This is a fn name decl site — skip.
+                        } else {
+                            enclosing = idx;
+                        }
+                    }
+                }
+                if (enclosing) |eidx| {
+                    try hits.append(allocator, .{
+                        .idx = eidx,
+                        .span = .{ .start = off_u32, .end = @intCast(end) },
+                    });
+                }
+            }
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    try out.append(allocator, '[');
+    var first_caller = true;
+    const uri_json = try jsonStringify(allocator, uri);
+    defer allocator.free(uri_json);
+
+    // Emit one `from` per distinct enclosing fn. Pass over the sites in
+    // declaration order so output is deterministic.
+    for (sites.items, 0..) |s, idx| {
+        var any = false;
+        for (hits.items) |h| if (h.idx == idx) {
+            any = true;
+            break;
+        };
+        if (!any) continue;
+        if (!first_caller) try out.append(allocator, ',');
+        first_caller = false;
+
+        try out.appendSlice(allocator, "{\"from\":");
+        try appendCallHierarchyItem(&out, allocator, source, uri_json, s);
+        try out.appendSlice(allocator, ",\"fromRanges\":[");
+        var first_range = true;
+        for (hits.items) |h| {
+            if (h.idx != idx) continue;
+            if (!first_range) try out.append(allocator, ',');
+            first_range = false;
+            try appendRangeJson(&out, allocator, rangeFromSpan(source, h.span));
+        }
+        try out.appendSlice(allocator, "]}");
+    }
+    try out.append(allocator, ']');
+    return out.toOwnedSlice(allocator);
+}
+
+fn onOutgoingCalls(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    const p = params orelse return writeResult(server.allocator, id_text, "[]");
+    const info = extractCallHierarchyItem(p) orelse {
+        try writeResult(server.allocator, id_text, "[]");
+        return;
+    };
+    const text = server.docs.get(info.uri) orelse {
+        try writeResult(server.allocator, id_text, "[]");
+        return;
+    };
+    const allocator = server.allocator;
+    const result = try buildOutgoingCalls(
+        allocator,
+        text,
+        info.uri,
+        info.name,
+        info.selection_line,
+        info.selection_char,
+    );
+    defer allocator.free(result);
+    try writeResult(server.allocator, id_text, result);
+}
+
+/// Build the JSON `result` array (CallHierarchyOutgoingCall[]) for a
+/// callHierarchy/outgoingCalls request. Same-file only.
+///
+/// Strategy: locate the source fn (matched by name + selection span), scan
+/// its body span for whole-word identifiers that name another known fn,
+/// and group hits by callee. Skip self-recursion's own decl site, but do
+/// emit a `to` entry for genuine recursion.
+fn buildOutgoingCalls(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    uri: []const u8,
+    source_name: []const u8,
+    source_line: usize,
+    source_character: usize,
+) ![]u8 {
+    var diags = compiler.Diagnostics.init(allocator);
+    defer diags.deinit();
+    var arena = compiler.ast.Arena.init(allocator);
+    defer arena.deinit();
+    const file = compiler.parseSource(allocator, source, &arena, &diags) catch {
+        return allocator.dupe(u8, "[]");
+    };
+
+    var sites: std.ArrayList(FnSite) = .{};
+    defer sites.deinit(allocator);
+    try collectFnSites(allocator, source, file, &sites);
+
+    const src_off = posToOffset(source, source_line, source_character) orelse {
+        return allocator.dupe(u8, "[]");
+    };
+    var src_idx: ?usize = null;
+    for (sites.items, 0..) |s, i| {
+        if (!std.mem.eql(u8, s.name, source_name)) continue;
+        if (s.selection.start != src_off) continue;
+        src_idx = i;
+        break;
+    }
+    const sidx = src_idx orelse return allocator.dupe(u8, "[]");
+    const src_site = sites.items[sidx];
+
+    // Determine the body byte range to scan: prefer the body span when
+    // present (skips the signature itself), else fall back to full span.
+    var scan_start: u32 = src_site.full.start;
+    var scan_end: u32 = src_site.full.end;
+    for (file.decls) |decl| switch (decl) {
+        .fn_decl => |fd| if (fd.sig.span.start == src_site.selection.start - 0 and std.mem.eql(u8, fd.sig.name, source_name)) {
+            if (fd.body) |b| {
+                scan_start = b.span.start;
+                scan_end = b.span.end;
+            }
+        },
+        .owned_struct => |os| for (os.fns) |fd| if (std.mem.eql(u8, fd.sig.name, source_name)) {
+            const fns_name_span = fnNameSpan(source, fd.sig);
+            if (fns_name_span.start == src_site.selection.start) {
+                if (fd.body) |b| {
+                    scan_start = b.span.start;
+                    scan_end = b.span.end;
+                }
+            }
+        },
+        .struct_decl => |sd| for (sd.fns) |fd| if (std.mem.eql(u8, fd.sig.name, source_name)) {
+            const fns_name_span = fnNameSpan(source, fd.sig);
+            if (fns_name_span.start == src_site.selection.start) {
+                if (fd.body) |b| {
+                    scan_start = b.span.start;
+                    scan_end = b.span.end;
+                }
+            }
+        },
+        .impl_block => |ib| for (ib.fns) |fd| if (std.mem.eql(u8, fd.sig.name, source_name)) {
+            const fns_name_span = fnNameSpan(source, fd.sig);
+            if (fns_name_span.start == src_site.selection.start) {
+                if (fd.body) |b| {
+                    scan_start = b.span.start;
+                    scan_end = b.span.end;
+                }
+            }
+        },
+        else => {},
+    };
+
+    // Map: callee-site-idx -> list of call-site spans.
+    const Hit = struct { idx: usize, span: compiler.diagnostics.Span };
+    var hits: std.ArrayList(Hit) = .{};
+    defer hits.deinit(allocator);
+
+    // Build a quick name -> site lookup. We pick the first site per name;
+    // for genuinely overloaded names (e.g. two methods named `bump` on
+    // different structs) the first decl wins — same-file scope keeps this
+    // pragmatic without a full type resolver.
+    var name_to_idx = std.StringHashMap(usize).init(allocator);
+    defer name_to_idx.deinit();
+    for (sites.items, 0..) |s, i| {
+        if (!name_to_idx.contains(s.name)) try name_to_idx.put(s.name, i);
+    }
+
+    var i: usize = scan_start;
+    while (i < scan_end and i < source.len) {
+        const c = source[i];
+        if (c == '"') {
+            i += 1;
+            while (i < scan_end and i < source.len) : (i += 1) {
+                if (source[i] == '\\' and i + 1 < source.len) {
+                    i += 1;
+                    continue;
+                }
+                if (source[i] == '"') {
+                    i += 1;
+                    break;
+                }
+            }
+            continue;
+        }
+        if (c == '\'') {
+            i += 1;
+            while (i < scan_end and i < source.len and source[i] != '\'') : (i += 1) {
+                if (source[i] == '\\' and i + 1 < source.len) i += 1;
+            }
+            if (i < source.len) i += 1;
+            continue;
+        }
+        if (c == '/' and i + 1 < source.len and source[i + 1] == '/') {
+            while (i < scan_end and i < source.len and source[i] != '\n') i += 1;
+            continue;
+        }
+        if (compiler.token.identStart(c) and (i == 0 or !compiler.token.identCont(source[i - 1]))) {
+            var end: usize = i + 1;
+            while (end < source.len and compiler.token.identCont(source[end])) end += 1;
+            if (end > scan_end) {
+                i = end;
+                continue;
+            }
+            const word = source[i..end];
+            if (name_to_idx.get(word)) |idx| {
+                // Skip the source fn's own decl identifier if it falls
+                // inside the scan range (won't normally — body span starts
+                // after the sig — but defensive against future parser
+                // changes that widen body spans).
+                if (idx == sidx and i == src_site.selection.start) {
+                    // skip
+                } else {
+                    try hits.append(allocator, .{
+                        .idx = idx,
+                        .span = .{ .start = @intCast(i), .end = @intCast(end) },
+                    });
+                }
+            }
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    try out.append(allocator, '[');
+    var first_callee = true;
+    const uri_json = try jsonStringify(allocator, uri);
+    defer allocator.free(uri_json);
+
+    for (sites.items, 0..) |s, idx| {
+        var any = false;
+        for (hits.items) |h| if (h.idx == idx) {
+            any = true;
+            break;
+        };
+        if (!any) continue;
+        if (!first_callee) try out.append(allocator, ',');
+        first_callee = false;
+
+        try out.appendSlice(allocator, "{\"to\":");
+        try appendCallHierarchyItem(&out, allocator, source, uri_json, s);
+        try out.appendSlice(allocator, ",\"fromRanges\":[");
+        var first_range = true;
+        for (hits.items) |h| {
+            if (h.idx != idx) continue;
+            if (!first_range) try out.append(allocator, ',');
+            first_range = false;
+            try appendRangeJson(&out, allocator, rangeFromSpan(source, h.span));
+        }
+        try out.appendSlice(allocator, "]}");
+    }
+    try out.append(allocator, ']');
+    return out.toOwnedSlice(allocator);
 }
 
 fn onWorkspaceSymbol(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
