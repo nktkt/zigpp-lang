@@ -7,10 +7,9 @@
 /// resolves through normal Zig method lookup. Each call site of
 /// `welcome(impl Greeter, ...)` is monomorphized to the concrete type.
 ///
-/// (Note: structural traits — opt-in duck typing via `trait Foo : structural`
-/// — landed in v0.2; see `examples/structural_trait.zpp` for that surface.
-/// This example deliberately stays on nominal `impl` blocks to exercise
-/// multi-parameter trait dispatch, which is the less-covered surface.)
+/// See `examples/structural_trait.zpp` for the `: structural` opt-in
+/// duck-typing variant. This file focuses on multi-parameter trait
+/// dispatch through a nominal trait, which is a less-covered surface.
 ///
 /// Lowered Zig sketch:
 ///     const Tweet = struct {
