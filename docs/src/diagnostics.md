@@ -24,7 +24,7 @@ auto-applicable quick-fix (called out below).
 | Z0001 | unknown trait                                        | Traits & `impl`       |
 | Z0002 | structural trait method missing on type              | Traits & `impl`       |
 | Z0010 | owned struct missing deinit                          | Ownership             |
-| Z0011 | `using` target has no deinit                         | Ownership             |
+| Z0011 | `using` target lacks deinit                         | Ownership             |
 | Z0020 | use after move                                       | Move / borrow         |
 | Z0021 | borrow invalidated by move                           | Move / borrow         |
 | Z0030 | function violates declared effect                    | Effects               |
@@ -162,7 +162,7 @@ real cleanup.
 See: `examples/owned_file.zpp` (compliant example),
 `tests/diagnostics/diags.zig` (negative fixture).
 
-### Z0011 — `using` target has no deinit
+### Z0011 — `using` target lacks deinit
 
 `using x = expr;` lowers to `var x = expr; defer x.deinit();`. The
 type of `expr` must therefore have a `deinit` method, otherwise the
