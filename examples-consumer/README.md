@@ -61,7 +61,7 @@ and uses it to lower `src/main.zpp` at build time:
 const zpp_dep = b.dependency("zigpp", .{ .target = target, .optimize = optimize });
 const lower = b.addRunArtifact(zpp_dep.artifact("zpp"));
 lower.addArg("lower");
-lower.addArg("src/main.zpp");
+lower.addFileArg(b.path("src/main.zpp"));
 const lowered = lower.captureStdOut();
 // ...wrap in addWriteFiles to give it a stable name, then build as exe.
 ```
