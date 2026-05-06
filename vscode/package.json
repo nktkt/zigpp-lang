@@ -1,8 +1,8 @@
 {
   "name": "zigpp",
   "displayName": "Zig++ Language Support",
-  "description": "Syntax highlighting, LSP diagnostics, and run/lower commands for the Zig++ language (.zpp).",
-  "version": "0.1.0",
+  "description": "Zig++ (.zpp) editor support: diagnostics, hover/definition/references/rename, signature help, semantic tokens, inlay hints, folding ranges, find implementations, call hierarchy, and code lenses.",
+  "version": "0.2.0",
   "publisher": "zigpp",
   "license": "MIT",
   "engines": {
@@ -86,8 +86,42 @@
         "command": "zigpp.openDocs",
         "title": "Zig++: Open Docs",
         "category": "Zig++"
+      },
+      {
+        "command": "zpp.runActiveFile",
+        "title": "Zig++: Run Active File (Terminal)",
+        "category": "Zig++"
+      },
+      {
+        "command": "zpp.explainAtCursor",
+        "title": "Zig++: Explain Diagnostic at Cursor",
+        "category": "Zig++"
       }
     ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "zpp.runActiveFile",
+          "when": "editorLangId == zigpp"
+        },
+        {
+          "command": "zpp.explainAtCursor",
+          "when": "editorLangId == zigpp"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "zpp.runActiveFile",
+          "when": "editorLangId == zigpp",
+          "group": "zigpp@1"
+        },
+        {
+          "command": "zpp.explainAtCursor",
+          "when": "editorLangId == zigpp",
+          "group": "zigpp@2"
+        }
+      ]
+    },
     "keybindings": [
       {
         "command": "zigpp.run",

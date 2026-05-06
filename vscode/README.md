@@ -13,6 +13,34 @@ official Zig extension.
 
 ## Features
 
+The `zpp-lsp` language server advertises (and this extension wires up) the
+following capabilities. New entries in v0.2.0 are flagged **(new)**.
+
+- **Hover with explanations** for diagnostics (long-form text + docs link).
+- **Go to definition** + **go to type definition** (same-file).
+- **Find all references** + **workspace symbol search** (open documents).
+- **Rename** + `prepareRename` (top-level decl names, same-file).
+- **Document outline** (traits, structs, owned structs, impl blocks,
+  extern interfaces, top-level functions).
+- **Completion** + **signature help** (single-signature, with active
+  parameter tracking).
+- **Code actions** — quick-fix `Explain Z####` per diagnostic plus
+  `WorkspaceEdit` auto-fixes for Z0010 (`deinit` stub) and Z0040 (trait
+  method stubs).
+- **Semantic tokens** — `full`, `range`, and `full/delta` (incremental).
+- **Inlay hints** **(new)** — parameter-name and inferred-type hints rendered
+  inline by the editor.
+- **Folding ranges** **(new)** — block / region folds emitted by the server
+  rather than VS Code's regex heuristic.
+- **Find implementations** **(new)** — `Go to Implementations` (`Cmd/Ctrl+F12`)
+  on a trait jumps to every `impl <Trait> for ...` in the workspace.
+- **Call hierarchy** **(new)** — `prepareCallHierarchy` plus incoming and
+  outgoing calls; drives VS Code's Call Hierarchy panel.
+- **Code lenses** **(new)** — actionable lenses inline above functions,
+  traits, and impl blocks (e.g. "N references", "Run this fn").
+
+Editor integration also includes:
+
 - Syntax highlighting tuned for the full Zig 0.16 keyword set plus the Zig++
   extensions (`trait`, `impl`, `dyn`, `using`, `owned`, `own`, `move`,
   `where`, `requires`, `ensures`, `effects`, `derive`, `interface`).
@@ -128,7 +156,7 @@ cd vscode
 npm install
 npm run compile
 npx @vscode/vsce package
-code --install-extension zigpp-0.1.0.vsix
+code --install-extension zigpp-0.2.0.vsix
 ```
 
 ### Development mode (recommended while iterating)
@@ -154,31 +182,22 @@ code --install-extension zigpp-0.1.0.vsix
 | `Zig++: Show Lowered Zig` (`zigpp.lower`) | `Ctrl+Shift+L` (`Cmd+Shift+L` on macOS) | Run `zpp lower` and open the emitted Zig in a new editor. |
 | `Zig++: Explain Diagnostic Code` (`zigpp.explain`) | `Ctrl+Shift+E` (`Cmd+Shift+E` on macOS) | Look up the long-form explanation for a `Z####` diagnostic. |
 | `Zig++: Open Docs` (`zigpp.openDocs`) | `Ctrl+Shift+D` (`Cmd+Shift+D` on macOS) | Open the Zig++ docs site in your default browser. |
+| `Zig++: Run Active File (Terminal)` (`zpp.runActiveFile`) | _(unbound)_ | Run `zpp run <activeFile>` in an integrated terminal so output is interactive. |
+| `Zig++: Explain Diagnostic at Cursor` (`zpp.explainAtCursor`) | _(unbound)_ | Look up the diagnostic under the cursor non-interactively (no input prompt) and surface the first line as a toast. |
 
 ## Known limitations
 
-- The LSP is intentionally MVP. It currently surfaces diagnostics from the
-  `zpp` parser/sema and supports `textDocument/formatting`,
-  `textDocument/hover`, `textDocument/documentSymbol` (Outline view), a
-  context-free `textDocument/completion` (keywords + top-level decl names),
-  same-file `textDocument/definition`, same-file
-  `textDocument/typeDefinition` (param-binding -> decl of its type),
-  same-file `textDocument/signatureHelp` (single SignatureInformation
-  for the enclosing call's callee), same-file `textDocument/references`,
-  `workspace/symbol` over open documents, same-file
-  `textDocument/rename` (top-level decl names only),
-  `textDocument/codeAction` (quick-fix `Explain Z####` per diagnostic
-  for every code, plus `WorkspaceEdit` auto-fix entries for Z0010 and
-  Z0040), and `textDocument/semanticTokens/{full,range,full/delta}`
-  (full, viewport-restricted, and incremental highlighting).
-  Cross-file go-to-definition, cross-file references, cross-file
-  rename, rename of parameters / locals / method names,
+- The LSP server's coverage is breadth-over-depth: most capabilities are
+  same-file only. Cross-file go-to-definition, cross-file references,
+  cross-file rename, rename of parameters / locals / method names,
   type-definition for locals / receivers, signature help for
   method-on-receiver calls and overloaded signatures, workspace
   search across un-opened files, context-aware completion,
   method-on-receiver navigation, and auto-fix code actions for the
   remaining diagnostic codes (Z0020, Z0021, Z0030, Z0050, Z0060) are
-  not implemented yet.
+  not implemented yet. The newer features (inlay hints, folding,
+  implementations, call hierarchy, code lenses) follow the same
+  same-file scope.
 - Semantic highlighting now ships from the LSP. The TextMate grammar
   remains as a fallback for clients that don't speak semantic tokens, for
   documents the LSP fails to lex, and for the brief window before the
