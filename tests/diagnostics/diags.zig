@@ -295,6 +295,117 @@ test "Z0030: nopanic fn that panics fires" {
     try std.testing.expect(hasCode(&result.diags, "Z0030"));
 }
 
+test "Z0030: noasync annotation matches inference does not fire" {
+    // `arith` is pure arithmetic and `quiet` only calls it. Neither body
+    // contains any of the async heuristic substrings, so inference agrees
+    // with the `.noasync` annotation and Z0030 must not fire.
+    const a = std.testing.allocator;
+    const src =
+        \\fn arith(x: i32) i32 { return x + 1; }
+        \\effects(.noasync) fn quiet(x: i32) i32 {
+        \\    return arith(x) * 2;
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(!hasCode(&result.diags, "Z0030"));
+}
+
+test "Z0030: noasync fn that spawns a thread fires" {
+    // `racy` declares .noasync but the body literally contains
+    // `std.Thread.spawn`, which is in the async heuristic. Z0030 must fire.
+    const a = std.testing.allocator;
+    const src =
+        \\const std = @import("std");
+        \\effects(.noasync) fn racy() !void {
+        \\    const t = try std.Thread.spawn(.{}, work, .{});
+        \\    t.join();
+        \\}
+        \\fn work() void {}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(hasCode(&result.diags, "Z0030"));
+}
+
+test "Z0030: noasync fn that transitively spawns fires" {
+    // `outer` declares .noasync but calls `inner`, whose body uses
+    // `TaskGroup` from the async heuristic. Z0030 must fire on `outer`.
+    // It must NOT fire on `inner` itself because `inner` does not
+    // declare .noasync.
+    const a = std.testing.allocator;
+    const src =
+        \\const std = @import("std");
+        \\const zpp = @import("zpp");
+        \\fn inner(allocator: std.mem.Allocator) !void {
+        \\    var group = zpp.async_mod.TaskGroup.init(allocator);
+        \\    defer group.deinit();
+        \\    try group.join();
+        \\}
+        \\effects(.noasync) fn outer(allocator: std.mem.Allocator) !void {
+        \\    try inner(allocator);
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(hasCode(&result.diags, "Z0030"));
+    var z0030_count: usize = 0;
+    for (result.diags.items.items) |d| {
+        if (std.mem.eql(u8, d.code.id(), "Z0030")) z0030_count += 1;
+    }
+    // Only the `.noasync` violation on `outer` — `inner` does not
+    // declare any denial so its inferred `.async` is fine.
+    try std.testing.expectEqual(@as(usize, 1), z0030_count);
+}
+
+test "@effectsOf(spawner) surfaces async after panic" {
+    // A fn that uses `TaskGroup` (the async heuristic) lowers to
+    // `"async"`. The join order is alloc/io/panic/async — async sits
+    // after the three classic axes and before any `custom("X")` trailers.
+    const a = std.testing.allocator;
+    var diags = compiler.Diagnostics.init(a);
+    defer diags.deinit();
+    const src =
+        \\const std = @import("std");
+        \\const zpp = @import("zpp");
+        \\fn spawner(allocator: std.mem.Allocator) !void {
+        \\    var g = zpp.async_mod.TaskGroup.init(allocator);
+        \\    defer g.deinit();
+        \\    try g.join();
+        \\}
+        \\fn ask() []const u8 { return @effectsOf(spawner); }
+    ;
+    const out = try compiler.compileToZig(a, src, &diags);
+    defer a.free(out);
+    try std.testing.expect(!hasCode(&diags, "Z0050"));
+    try std.testing.expect(std.mem.indexOf(u8, out, "return \"async\";") != null);
+}
+
+test "@effectsOf joins async after alloc/io/panic" {
+    // A fn that allocates, prints (io), and spawns a thread (async)
+    // produces `"alloc,io,async"` — async appears after panic in the
+    // fixed join order and before any `custom("X")` trailers.
+    const a = std.testing.allocator;
+    var diags = compiler.Diagnostics.init(a);
+    defer diags.deinit();
+    const src =
+        \\const std = @import("std");
+        \\fn busy(al: std.mem.Allocator) !void {
+        \\    const xs = try al.alloc(u8, 1);
+        \\    _ = xs;
+        \\    std.debug.print("hi\n", .{});
+        \\    const t = try std.Thread.spawn(.{}, work, .{});
+        \\    t.join();
+        \\}
+        \\fn work() void {}
+        \\fn ask() []const u8 { return @effectsOf(busy); }
+    ;
+    const out = try compiler.compileToZig(a, src, &diags);
+    defer a.free(out);
+    try std.testing.expect(!hasCode(&diags, "Z0050"));
+    try std.testing.expect(std.mem.indexOf(u8, out, "return \"alloc,io,async\";") != null);
+}
+
 test "@effectsOf(pure) lowers to empty string" {
     // Pure fn → @effectsOf(pure) substitutes to the literal `""`.
     // Driving `compileToZig` exercises the end-to-end lowering path
