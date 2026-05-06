@@ -4,6 +4,7 @@ const fmt_lib = @import("zpp_fmt.zig");
 const lsp = @import("zpp_lsp.zig");
 const doc = @import("zpp_doc.zig");
 const migrate = @import("zpp_migrate.zig");
+const test_runner = @import("zpp_test.zig");
 const init_templates = @import("zpp_init_templates.zig");
 const zpp_build = @import("zpp_buildzpp.zig");
 
@@ -28,6 +29,7 @@ const Subcommand = enum {
     lsp,
     init,
     explain,
+    @"test",
     version,
     help,
 
@@ -44,6 +46,7 @@ const Subcommand = enum {
             .{ "lsp", .lsp },
             .{ "init", .init },
             .{ "explain", .explain },
+            .{ "test", .@"test" },
             .{ "version", .version },
             .{ "--version", .version },
             .{ "-V", .version },
@@ -128,9 +131,14 @@ pub fn run(allocator: std.mem.Allocator, argv: [][:0]u8) !ExitCode {
         .lsp => cmdLsp(allocator, rest),
         .init => cmdInit(allocator, rest),
         .explain => cmdExplain(rest),
+        .@"test" => cmdTest(allocator, rest),
         .version => cmdVersion(),
         .help => cmdHelp(rest),
     };
+}
+
+fn cmdTest(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
+    return test_runner.runTest(allocator, args);
 }
 
 fn printUsage() void {
@@ -153,6 +161,7 @@ fn printUsage() void {
         \\    lsp                  start LSP server on stdin/stdout
         \\    init <name> [opts]   scaffold a new Zig++ project under <name>/ (--template exe|lib|plugin)
         \\    explain <Z####|-l>   explain a diagnostic code in detail (--list to see all)
+        \\    test [paths...]      lower .zpp files and run their `test` blocks via `zig test`
         \\    version              print version
         \\    help [subcommand]    show this help (or details for a subcommand)
         \\
@@ -186,6 +195,7 @@ fn cmdHelp(args: [][:0]u8) !ExitCode {
         .lsp => "zpp lsp\n  Speak LSP over stdio. Run from your editor; not for human use.\n",
         .init => "zpp init <name> [--template exe|lib|plugin]\n  Scaffold a new Zig++ project under <name>/. Defaults to --template exe (executable).\n  Other templates: lib (public-API library, no main), plugin (extern interface + host).\n  Use `zpp init --list` to see every template with a one-line description.\n  Short forms: `-t lib` is equivalent to `--template=lib`.\n  Refuses to overwrite an existing directory.\n",
         .explain => "zpp explain <Z####|--list>\n  Print a long-form explanation of a diagnostic code, or `--list` to see every code with a one-line summary.\n",
+        .@"test" => "zpp test [paths...] [--filter <p>] [--release] [-v]\n  Lower every .zpp under <paths> (default '.') into .zpp-cache/<rel>.zig, then run `zig test` against each lowered file. Exits non-zero if any file fails.\n",
         .version => "zpp version\n  Print compiler version.\n",
         .help => "zpp help [subcommand]\n  Show this message.\n",
     };
