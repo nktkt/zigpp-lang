@@ -15,7 +15,7 @@ Phases 0-7 are substantially complete. The remaining Phase 6 item (`zpp` depende
 | Phase 2 — Trait System                  | ✅ done    | structural opt-in, Writer trait, default methods |
 | Phase 3 — Explicit RAII & Ownership     | ✅ done    | Z0010/Z0011/Z0020/Z0021 firing |
 | Phase 4 — dyn Trait & Plugin ABI        | ✅ done    | extern_plugin example loads |
-| Phase 5 — Effect System                 | ✅ done    | 6 axes (alloc, io, panic, async, custom, .nocustom) |
+| Phase 5 — Effect System                 | ✅ done    | 5 axes (alloc, io, panic, async, custom) with paired `no*` denials |
 | Phase 6 — Package, Build, Docs          | ⚠️ partial | build.zpp + HTML + snapshot gate done; semver dep resolution open |
 | Phase 7 — Concurrency                   | ✅ done    | TaskGroup + cancellation; Zig 0.17 I/O migration pending upstream |
 | Phase 8 — Stabilization (1.0)           | ⏳ not started | next milestone after Phase 6 closure |
