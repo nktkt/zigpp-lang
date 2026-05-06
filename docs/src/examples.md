@@ -1,9 +1,14 @@
 # Examples
 
-The `examples/` directory contains 8 small `.zpp` programs that
-exercise each Zig++ construct. All of them lower to readable Zig and
-run end-to-end (`zig build e2e` runs the lot). Each section below
-shows the source plus the actual stdout produced by `zpp run`.
+The `examples/` directory contains 15+ `.zpp` programs (plus a few
+multi-file projects under `multi_file/`, `multi_file_pub/`,
+`build_zpp/`, and `cli/`) that exercise each Zig++ construct. All of
+them lower to readable Zig and run end-to-end (`zig build e2e` runs
+the single-file ones; the multi-file projects are built directly).
+The sections below walk through the headline examples; see the
+[index in `examples/README.md`](https://github.com/nktkt/zigpp-lang/blob/main/examples/README.md)
+for the full list. Each section shows the source plus the actual
+stdout produced by `zpp run`.
 
 ## hello_trait.zpp — static dispatch
 
@@ -120,7 +125,7 @@ primitive is explicit; there is no implicit await.
 
 ## event_bus.zpp — integration showcase
 
-The other 8 examples each demonstrate one feature in isolation.
+The other examples each demonstrate one feature in isolation.
 `event_bus.zpp` shows them composing: a `trait Handler` with two
 `impl`s, a `derive(.{ Hash, Eq })` `Event` payload, an `owned struct
 EventBus` scoped with `using`, a `dyn Handler` slice, and a

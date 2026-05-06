@@ -79,15 +79,30 @@ zpp lower examples/hello_trait.zpp
 - **`using x = expr;`** — 明示的 RAII バインダー (`var x = expr; defer x.deinit();` に低下)
 - **`owned struct`** — must-deinit を sema が検査。`deinit` 不在は Z0010
 - **`own var x`** + **`move x`** — affine な所有権、use-after-move 検出 (Z0020)
+- **`own var x`** + **`move x`** に加えて、マルチボロー + ブロックスコープを
+  考慮するボローチェッカー (Z0021)
 - **`requires(cond)` / `ensures(cond)`** — `zpp.contract.*` 経由のランタイム
   契約。`ensures` は `defer` で全 scope-exit に対し評価
-- **`effects(.noalloc)`** — pure 関数中のアロケータ呼び出しを sema lint (Z0030)
-- **`derive(.{ Hash, Eq, Debug, Json })`** — `a.hash()` や `User.eq(a, b)` が
-  そのまま動くよう、ターゲット型本体にメソッドを注入
+- **`effects(.noalloc)` / `.noio` / `.nopanic` / `.noasync` / `.nocustom("X")`** —
+  ボトムアップのエフェクト推論。`a.alloc(...)` を呼ぶ関数は `.alloc` と推論され、
+  `.noalloc` を宣言しているのに推論集合に `.alloc` が入っていれば Z0030。
+  ユーザ定義 `.custom("X")` も同一ファイル内の callee を 1 ラウンド伝搬します
+  (Z0060)。`@effectsOf(f)` が推論集合を comptime の `[]const u8` で取り出します。
+- **`derive(.{ Hash, Eq, Ord, Default, Clone, Debug, Json, Iterator, Serialize, Compare, FromStr })`** —
+  `a.hash()` / `User.eq(a, b)` / `a.iter()` / `a.serialize(arena)` /
+  `User.fromStr(s, arena)` / `User.lt(a, b)` がそのまま使えるよう、
+  ターゲット型本体に comptime ヘルパーをメソッドとして注入
 - **`where T: Trait`** — ジェネリック制約構文 (lowering 時はドロップ、ドキュメント目的)
-- **エンドツーエンド**: 8 つの example が `zpp run` および `zig build e2e` で完走確認済
-- **fuzz-clean**: parser/sema/lowerer に対し 83,000 入力を投入、panic / leak /
+- **`\\`-prefixed multi-line strings** — Zig の `\\` 構文と同様、低下後の
+  Zig にそのまま透過します
+- **エンドツーエンド**: 10 個以上の example が `zpp run` および
+  `zig build e2e` で完走確認済
+- **fuzz-clean**: parser/sema/lowerer に対し 83,000+ 入力を投入、panic / leak /
   timeout ゼロ
+- **`zpp-lsp` による IDE フィーチャ一式**: hover-with-explain、定義へ移動、
+  参照検索、ワークスペースシンボル検索、リネーム、ドキュメントシンボル
+  (Outline)、キーワード + 宣言名補完、コードアクション (Explain Z####)、
+  セマンティックトークン (`/full`、`/range`、`/full/delta`)
 
 ## ディレクトリ構造
 
@@ -98,7 +113,7 @@ zigpp/
   compiler/            .zpp -> .zig フロントエンド (token, ast, parser, sema, lower, diagnostics)
   lib/                 zpp ランタイム (Dyn, Owned, contracts, derive, async, traits, testing)
   tools/               zpp CLI + fmt / lsp / doc / migrate
-  examples/            8 個の .zpp プログラム (各構文要素を網羅)
+  examples/            15+ 個の .zpp プログラムと multi-file / build.zpp / CLI プロジェクト
   tests/               compile / diagnostic / snapshot / behavior / no-hidden-alloc / fuzz
   vscode/              VS Code 拡張 (TextMate grammar + LSP client)
   docs/                mdBook ドキュメントソース
@@ -164,8 +179,14 @@ cd vscode && npm install && npm run compile
 # F5 で開発ホスト起動、または vsce package で .vsix 化
 ```
 
-拡張は構文ハイライト (TextMate grammar)、`zpp-lsp` 経由の診断、
-`Zig++: Run File` / `Zig++: Show Lowered Zig` コマンドを提供します。
+拡張は構文ハイライト (TextMate + LSP セマンティックトークン)、診断、
+補完、hover-with-explain、定義へ移動、参照検索、ワークスペースシンボル
+検索、リネーム、Outline ビュー、コードアクション、`Zig++: Run File` /
+`Zig++: Show Lowered Zig` コマンドを提供します。
+
+Vim/Neovim、Emacs、Helix などその他の LSP クライアントは、`zpp-lsp`
+バイナリに stdio で直接接続できます。上記の IDE 側機能はすべて言語
+サーバ側から提供されているため、VS Code 以外でも同じ機能が使えます。
 
 ## 哲学
 
@@ -180,9 +201,13 @@ cd vscode && npm install && npm run compile
 
 ## ロードマップ
 
-段階的に進めています。[ROADMAP.md](ROADMAP.md) 参照。今日の時点で
-コア機能 (Phase 0–4) はエンドツーエンドで動いており、Phase 5
-(エフェクト推論) と Phase 7 (本格的な並行実行) が残っています。
+段階的に進めています。[ROADMAP.md](ROADMAP.md) と
+[docs/src/v0.2-plan.md](docs/src/v0.2-plan.md) 参照。今日の時点で
+コア機能 (Phase 0–4) はエンドツーエンドで動いています。Phase 5
+(エフェクト推論) は **6 ラウンド** 完了済: `.alloc`、`.io`、`.panic`、
+`@effectsOf(f)` クエリ、`.custom("X")` ユーザ定義エフェクト、I/O
+suspension 軸の `.noasync`。Phase 7 (本格的な並行実行) は TaskGroup
+ランタイムが進行中です。
 
 ## コントリビュート
 

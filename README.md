@@ -97,7 +97,7 @@ zigpp/
   compiler/            .zpp -> .zig frontend (token, ast, parser, sema, lower, diagnostics)
   lib/                 zpp runtime library (Dyn, Owned, contracts, derive, async, traits, testing)
   tools/               zpp CLI plus fmt, lsp, doc, migrate
-  examples/            8 .zpp programs covering each construct
+  examples/            15+ .zpp programs plus multi-file / build.zpp / CLI projects
   tests/               compile, diagnostic, snapshot, behavior, no-hidden-alloc, fuzz
   vscode/              VS Code extension (TextMate grammar + LSP client)
   README.md            this file
@@ -201,9 +201,10 @@ for syntax and lowering rules.
 
 Phased. See [ROADMAP.md](ROADMAP.md) and [docs/src/v0.2-plan.md](docs/src/v0.2-plan.md).
 Today the core (Phases 0–4) is working end-to-end. Phase 5 (effect
-inference) is **landed in five rounds**: `.alloc`, `.io`, `.panic`,
-`@effectsOf(f)` queryable, and `.custom("X")` user-defined effects.
-Phase 7 (real concurrency) is the active TaskGroup runtime.
+inference) is **landed in six rounds**: `.alloc`, `.io`, `.panic`,
+`@effectsOf(f)` queryable, `.custom("X")` user-defined effects, and
+`.noasync` on the I/O suspension axis. Phase 7 (real concurrency) is
+the active TaskGroup runtime.
 
 ## Contributing
 
