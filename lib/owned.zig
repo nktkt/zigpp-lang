@@ -44,8 +44,10 @@ pub fn Owned(comptime T: type) type {
             return self.state == .live;
         }
 
-        /// Asserts the value was taken. Call from a `defer` site that the
-        /// language lowering inserted to enforce single-consumption.
+        /// Asserts the value is no longer live (state is `.taken` or `.dead`).
+        /// Call from a `defer` site that the language lowering inserted to
+        /// enforce single-consumption — panics only when the value was never
+        /// consumed (state `.live`).
         pub fn deinit(self: *Self) void {
             if (safety_on and self.state == .live) {
                 @panic("Owned value dropped without being consumed");

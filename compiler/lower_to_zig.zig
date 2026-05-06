@@ -302,7 +302,7 @@ pub const Lowerer = struct {
             try self.lowerFnDecl(fd, 4);
             try self.write("\n");
         }
-        if (o.derive) |d| try self.lowerDeriveDecls(o.name, d);
+        if (o.derive) |d| try self.lowerDeriveDecls(d);
         try self.write("};\n");
     }
 
@@ -320,7 +320,7 @@ pub const Lowerer = struct {
             try self.lowerFnDecl(fd, 4);
             try self.write("\n");
         }
-        if (s.derive) |d| try self.lowerDeriveDecls(s.name, d);
+        if (s.derive) |d| try self.lowerDeriveDecls(d);
         try self.injectImplMethods(s.name);
         try self.write("};\n");
     }
@@ -357,8 +357,7 @@ pub const Lowerer = struct {
 
     /// Emit derived helpers as actual method-shaped decls so the user can write
     /// `a.hash()`, `a.eq(b)`, `User.debug.format(a, w)` etc. naturally.
-    fn lowerDeriveDecls(self: *Lowerer, type_name: []const u8, d: ast.DeriveAttr) !void {
-        _ = type_name;
+    fn lowerDeriveDecls(self: *Lowerer, d: ast.DeriveAttr) !void {
         try self.writeIndent(4);
         try self.write("// derive(.{ ");
         for (d.names, 0..) |n, idx| {
