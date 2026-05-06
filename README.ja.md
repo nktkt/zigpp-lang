@@ -24,7 +24,7 @@ Zig++ は Zig 0.15+ をベースにしたリサーチ言語です。名前付き
 
 Pre-alpha (v0.2)。v0.2 で構造的トレイト、トレイトメソッドのデフォルト本体、
 `.noasync` エフェクト軸、`Writer` 標準ライブラリトレイト、TaskGroup の
-キャンセル伝播、`zpp test` / `zpp explain --json` / `zpp init --template`
+キャンセル伝播、`zpp explain --json` / `zpp init --template`
 サブコマンド、`build.zpp`、フル機能の LSP が揃いました。言語表面は引き
 続き意図的に小さいまま、エンドツーエンドの守備範囲だけ広がっています。
 
@@ -117,10 +117,9 @@ zpp lower examples/hello_trait.zpp
   (`/full`、`/range`、`/full/delta`)、`inlayHint`、`foldingRange`、
   `implementation`、`callHierarchy`、`codeLens`
 - **CLI サブコマンド**: `zpp build / run / lower / fmt / check / watch / doc /
-  migrate / lsp / init / explain` に加え、v0.2 で追加された `zpp test`
-  (テストブロックを低下 + 実行)、`zpp explain --json` (IDE 向け機械可読
-  diagnostic explainer)、`zpp init --template lib | exe | plugin` (3 種の
-  プロジェクトひな形)
+  migrate / lsp / init / explain` に加え、v0.2 で追加された
+  `zpp explain --json` (IDE 向け機械可読 diagnostic explainer)、
+  `zpp init --template lib | exe | plugin` (3 種のプロジェクトひな形)
 - **`build.zpp`** — `build.zig` の薄いエイリアス。ソース横に `build.zpp` を
   置けばドライバが lowering してから `zig build` を呼びます
 - **Migrate +5 パターン** — `zpp-migrate` が新たに 5 種の `.zig` イディオム
@@ -167,14 +166,13 @@ zig build run -- help        # zpp CLI を呼ぶ
 
 ```
 zpp            メインドライバ: build / run / lower / fmt / check / watch / doc /
-               migrate / lsp / init / explain / test
+               migrate / lsp / init / explain
 zpp-fmt        フォーマッタ
 zpp-lsp        LSP サーバ (stdio JSON-RPC、VS Code 拡張から使用)
 zpp-doc        Markdown ドキュメント生成
 zpp-migrate    .zig -> .zpp 移行ヘルパー
 ```
 
-`zpp test` はツリー内の `test "..."` ブロックを低下して実行します。
 `zpp explain Z0030 --json` は IDE 向けの構造化ペイロードを出力します。
 `zpp init --template lib | exe | plugin` でひな形の形を選べます。
 
