@@ -10,6 +10,7 @@ pub const dyn_mod = @import("dyn.zig");
 pub const async_mod = @import("async.zig");
 pub const testing_ = @import("testing.zig");
 pub const derive = @import("derive.zig");
+pub const writer = @import("writer.zig");
 
 pub const Dyn = dyn_mod.Dyn;
 pub const VTableOf = trait.VTableOf;
