@@ -346,8 +346,24 @@ fn onHover(server: *Server, id_text: []const u8, params: ?std.json.Value) !void 
         try writeResult(server.allocator, id_text, "null");
         return;
     };
-    const line: usize = @intCast(pos.object.get("line").?.integer);
-    const character: usize = @intCast(pos.object.get("character").?.integer);
+    const line_v = pos.object.get("line") orelse {
+        try writeResult(server.allocator, id_text, "null");
+        return;
+    };
+    const char_v = pos.object.get("character") orelse {
+        try writeResult(server.allocator, id_text, "null");
+        return;
+    };
+    if (line_v != .integer or char_v != .integer) {
+        try writeResult(server.allocator, id_text, "null");
+        return;
+    }
+    if (line_v.integer < 0 or char_v.integer < 0) {
+        try writeResult(server.allocator, id_text, "null");
+        return;
+    }
+    const line: usize = @intCast(line_v.integer);
+    const character: usize = @intCast(char_v.integer);
 
     const list = server.diags.getPtr(uri.string) orelse {
         try writeResult(server.allocator, id_text, "null");

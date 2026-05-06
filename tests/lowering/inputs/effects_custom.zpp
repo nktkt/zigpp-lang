@@ -1,0 +1,12 @@
+const std = @import("std");
+
+effects(.custom("net")) fn fetch() void {}
+
+fn ask_net() []const u8 { return @effectsOf(fetch); }
+
+effects(.custom("net")) fn fetch_and_alloc(a: std.mem.Allocator) ![]u8 {
+    const buf = try a.alloc(u8, 16);
+    return buf;
+}
+
+fn ask_net_alloc() []const u8 { return @effectsOf(fetch_and_alloc); }

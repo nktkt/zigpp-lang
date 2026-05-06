@@ -96,7 +96,7 @@ zpp lower examples/hello_trait.zpp
 - **End-to-end pipeline** verified: 10+ example programs compile and run through `zpp run` AND `zig build e2e`
 - **Fuzz-clean**: 83,000+ generated/mutated inputs through the parser/sema/lowerer with zero panics, leaks, or timeouts
 - **Full IDE feature set via `zpp-lsp`**: hover-with-explain, go-to-definition, find references, workspace symbol search, rename, document symbol (Outline view), keyword + decl-name completion, code-action quick-fixes (Explain Z####), semantic tokens (`/full`, `/range`, `/full/delta`), `inlayHint`, `foldingRange`, `implementation`, `callHierarchy`, and `codeLens`
-- **CLI subcommands**: `zpp build / run / lower / fmt / check / watch / doc / migrate / lsp / init / explain`, plus v0.2 additions: `zpp explain --json` (machine-readable diagnostic explainer for IDEs) and `zpp init --template lib | exe | plugin` (three project scaffolds)
+- **CLI subcommands**: `zpp build / run / lower / fmt / check / watch / doc / migrate / test / lsp / init / explain`, plus v0.2 additions: `zpp test` (lowers each `.zpp` and runs `zig test` against it), `zpp explain --json` (machine-readable diagnostic explainer for IDEs) and `zpp init --template lib | exe | plugin` (three project scaffolds)
 - **`build.zpp`** — thin alias over `build.zig`. Drop a `build.zpp` next to your sources and the driver lowers it before invoking `zig build`.
 - **Migrate +5 patterns** — `zpp-migrate` recognises five additional `.zig` idioms (arena-scoped `defer`, manual vtable structs, `errdefer`-paired `init`, and two more) and emits `.zpp` rewrites
 
@@ -111,7 +111,7 @@ zigpp/
   tools/               zpp CLI plus fmt, lsp, doc, migrate (with templates/ for `init --template`)
   examples/            .zpp programs covering each construct, including build_zpp/, multi_file/, cli/
   examples-consumer/   sample downstream Zig project that imports the `zpp` runtime via `zig fetch`
-  bench/               microbenchmarks (dispatch, derive, TaskGroup)
+  bench/               microbenchmarks (compileToString: parse + sema + lower)
   tests/               compile, diagnostic, snapshot, behavior, no-hidden-alloc, fuzz
   vscode/              VS Code extension (TextMate grammar + LSP client + snippets)
   docs/                mdBook documentation source (deployed to GitHub Pages)
@@ -140,13 +140,14 @@ The CLIs install under `zig-out/bin/`:
 
 ```
 zpp            main driver: build, run, lower, fmt, check, watch, doc, migrate,
-               lsp, init, explain
+               test, lsp, init, explain
 zpp-fmt        formatter
 zpp-lsp        LSP server (stdin/stdout JSON-RPC; used by the VS Code extension)
 zpp-doc        markdown doc generator
 zpp-migrate    .zig -> .zpp migration helper
 ```
 
+`zpp test [paths...]` lowers every `.zpp` under the given paths into `.zpp-cache/<rel>.zig` and runs `zig test` against each (`--filter <p>`, `--release`, `-v`).
 `zpp explain Z0030 --json` emits a structured payload for IDE consumers.
 `zpp init --template lib | exe | plugin` picks the scaffold shape.
 
