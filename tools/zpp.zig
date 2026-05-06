@@ -5,6 +5,8 @@ const lsp = @import("zpp_lsp.zig");
 const doc = @import("zpp_doc.zig");
 const migrate = @import("zpp_migrate.zig");
 const test_runner = @import("zpp_test.zig");
+const init_templates = @import("zpp_init_templates.zig");
+const zpp_build = @import("zpp_buildzpp.zig");
 
 pub const version_string = "zpp 0.1.0 (Zig++ research compiler)";
 
@@ -148,6 +150,7 @@ fn printUsage() void {
         \\
         \\SUBCOMMANDS:
         \\    build [path]         lower .zpp -> .zig under .zpp-cache/ and run `zig build`
+        \\                         (also lowers a top-level `build.zpp` to `build.zig` if present)
         \\    run <file.zpp>       lower and execute a single source file
         \\    lower <file.zpp>     print lowered .zig to stdout
         \\    fmt [paths...]       format .zpp files in place
@@ -156,7 +159,7 @@ fn printUsage() void {
         \\    doc [paths...]       generate markdown docs from .zpp doc comments
         \\    migrate <file.zig>   suggest .zpp rewrites for a .zig file
         \\    lsp                  start LSP server on stdin/stdout
-        \\    init <name>          scaffold a new Zig++ project under <name>/
+        \\    init <name> [opts]   scaffold a new Zig++ project under <name>/ (--template exe|lib|plugin)
         \\    explain <Z####|-l>   explain a diagnostic code in detail (--list to see all)
         \\    test [paths...]      lower .zpp files and run their `test` blocks via `zig test`
         \\    version              print version
@@ -181,16 +184,16 @@ fn cmdHelp(args: [][:0]u8) !ExitCode {
         return .usage_error;
     };
     const detail = switch (sub) {
-        .build => "zpp build [path]\n  Lower every .zpp under <path> (default '.') into .zpp-cache/ mirroring layout, then invoke `zig build`.\n",
+        .build => "zpp build [path]\n  Lower every .zpp under <path> (default '.') into .zpp-cache/ mirroring layout, then invoke `zig build`. If a `build.zpp` exists at the project root it is lowered to `build.zig` first (skipped when a hand-written build.zig already exists; re-lowered when build.zpp is newer).\n",
         .run => "zpp run <file.zpp>\n  Lower a single .zpp source, write it to a tmp file, and execute it via `zig run`.\n",
         .lower => "zpp lower <file.zpp>\n  Print lowered .zig source for one file to stdout.\n",
         .fmt => "zpp fmt [paths...]\n  Re-emit .zpp files with canonical whitespace; expands directories.\n",
-        .check => "zpp check [paths...]\n  Parse and semantically analyse .zpp files; emit diagnostics; exit 1 on error.\n",
+        .check => "zpp check [paths...]\n  Parse and semantically analyze .zpp files; emit diagnostics; exit 1 on error.\n",
         .watch => "zpp watch [paths...]\n  Snapshot .zpp file mtimes and re-run `zpp check` whenever any of them changes. Polls every ~500ms; Ctrl-C to exit.\n",
         .doc => "zpp doc [paths...]\n  Walk .zpp files and emit Markdown for trait/fn/struct/extern interface decls.\n",
         .migrate => "zpp migrate <file.zig>\n  Diff suggestions to convert defer/init/deinit patterns to Zig++.\n",
         .lsp => "zpp lsp\n  Speak LSP over stdio. Run from your editor; not for human use.\n",
-        .init => "zpp init <name>\n  Scaffold a new Zig++ project under <name>/ with build.zig, build.zig.zon, src/main.zpp, and a starter README. Refuses to overwrite an existing directory.\n",
+        .init => "zpp init <name> [--template exe|lib|plugin]\n  Scaffold a new Zig++ project under <name>/. Defaults to --template exe (executable).\n  Other templates: lib (public-API library, no main), plugin (extern interface + host).\n  Use `zpp init --list` to see every template with a one-line description.\n  Short forms: `-t lib` is equivalent to `--template=lib`.\n  Refuses to overwrite an existing directory.\n",
         .explain => "zpp explain <Z####|--list>\n  Print a long-form explanation of a diagnostic code, or `--list` to see every code with a one-line summary.\n",
         .@"test" => "zpp test [paths...] [--filter <p>] [--release] [-v]\n  Lower every .zpp under <paths> (default '.') into .zpp-cache/<rel>.zig, then run `zig test` against each lowered file. Exits non-zero if any file fails.\n",
         .version => "zpp version\n  Print compiler version.\n",
@@ -335,6 +338,13 @@ fn findZppLibUpward(allocator: std.mem.Allocator) !?[]u8 {
     return null;
 }
 
+/// One-line warning emitted by `zpp_build.maybeLower` when a hand-written
+/// build.zig already exists alongside a build.zpp. Free function so it can
+/// be taken by address and passed as a function pointer.
+fn buildZppWarn(msg: []const u8) void {
+    ePrint("{s}\n", .{msg});
+}
+
 fn cmdBuild(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
     const split = splitBuildArgs(args);
     const root: []const u8 = if (split.zpp.len == 0) "." else split.zpp[0];
@@ -344,6 +354,16 @@ fn cmdBuild(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
         return .user_error;
     };
     defer src_dir.close();
+
+    // Step 0: handle `build.zpp` (the thin alias over `build.zig`). If a
+    // build.zpp is present we lower it to build.zig before walking sources
+    // so the subsequent `zig build` invocation sees the generated file.
+    // Precedence: a hand-written build.zig (no `Generated by zpp` header)
+    // wins; we only emit a one-line warning and continue.
+    _ = zpp_build.maybeLower(allocator, src_dir, &buildZppWarn) catch |e| {
+        ePrint("zpp build: build.zpp lowering failed: {s}\n", .{@errorName(e)});
+        return .user_error;
+    };
 
     var cache = try ensureCacheDir(allocator);
     defer cache.close();
@@ -781,17 +801,68 @@ fn cmdLsp(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
 }
 
 fn cmdExplain(args: [][:0]u8) !ExitCode {
-    if (args.len != 1) {
-        ePrint("zpp explain: expected exactly one argument (Z#### code or --list)\n", .{});
+    // Parse a tiny CLI: one optional `--json` flag (`-j` is also accepted)
+    // and either zero positional args (must be combined with `--list` /
+    // `-l`) or exactly one positional arg (a code id or the list flag).
+    // Order is irrelevant: `zpp explain --json Z0030` and `zpp explain
+    // Z0030 --json` both work.
+    var json_mode = false;
+    var list_mode = false;
+    var positional: ?[]const u8 = null;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--json") or std.mem.eql(u8, a, "-j")) {
+            json_mode = true;
+        } else if (std.mem.eql(u8, a, "--list") or std.mem.eql(u8, a, "-l")) {
+            list_mode = true;
+        } else {
+            if (positional != null) {
+                ePrint("zpp explain: expected at most one diagnostic code\n", .{});
+                return .usage_error;
+            }
+            positional = a;
+        }
+    }
+    if (!list_mode and positional == null) {
+        ePrint("zpp explain: expected a Z#### code or --list\n", .{});
         return .usage_error;
     }
-    const arg = args[0];
-    if (std.mem.eql(u8, arg, "--list") or std.mem.eql(u8, arg, "-l")) {
+    if (list_mode and positional != null) {
+        ePrint("zpp explain: --list takes no code argument\n", .{});
+        return .usage_error;
+    }
+
+    var allocator_state = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = allocator_state.deinit();
+    const allocator = allocator_state.allocator();
+
+    if (list_mode) {
+        if (json_mode) {
+            const json_text = renderListJsonAlloc(allocator) catch |e| {
+                ePrint("zpp explain: failed to render JSON: {s}\n", .{@errorName(e)});
+                return .compiler_bug;
+            };
+            defer allocator.free(json_text);
+            try writeAll(outStream(), json_text);
+            try writeAll(outStream(), "\n");
+            return .ok;
+        }
         return cmdExplainList();
     }
+
+    const arg = positional.?;
     // Accept lower- or upper-case input; normalize to upper for lookup.
     var upper_buf: [16]u8 = undefined;
     if (arg.len > upper_buf.len) {
+        if (json_mode) {
+            const json_text = renderUnknownJsonAlloc(allocator, arg) catch |e| {
+                ePrint("zpp explain: failed to render JSON: {s}\n", .{@errorName(e)});
+                return .compiler_bug;
+            };
+            defer allocator.free(json_text);
+            try writeAll(outStream(), json_text);
+            try writeAll(outStream(), "\n");
+            return .user_error;
+        }
         ePrint("zpp explain: '{s}' is not a recognized code\n", .{arg});
         return .user_error;
     }
@@ -799,10 +870,32 @@ fn cmdExplain(args: [][:0]u8) !ExitCode {
     const upper = upper_buf[0..arg.len];
 
     const code = compiler.diagnostics.codeFromId(upper) orelse {
+        if (json_mode) {
+            const json_text = renderUnknownJsonAlloc(allocator, arg) catch |e| {
+                ePrint("zpp explain: failed to render JSON: {s}\n", .{@errorName(e)});
+                return .compiler_bug;
+            };
+            defer allocator.free(json_text);
+            try writeAll(outStream(), json_text);
+            try writeAll(outStream(), "\n");
+            return .user_error;
+        }
         ePrint("zpp explain: unknown diagnostic code '{s}'\n", .{arg});
         ePrint("       run `zpp explain --list` to see every code.\n", .{});
         return .user_error;
     };
+
+    if (json_mode) {
+        const json_text = renderCodeJsonAlloc(allocator, code) catch |e| {
+            ePrint("zpp explain: failed to render JSON: {s}\n", .{@errorName(e)});
+            return .compiler_bug;
+        };
+        defer allocator.free(json_text);
+        try writeAll(outStream(), json_text);
+        try writeAll(outStream(), "\n");
+        return .ok;
+    }
+
     oPrint("{s}\n", .{compiler.diagnostics.explain(code)});
     return .ok;
 }
@@ -816,24 +909,334 @@ fn cmdExplainList() !ExitCode {
     return .ok;
 }
 
-const tpl_main_zpp = @embedFile("templates/main.zpp");
-const tpl_build_zig = @embedFile("templates/build.zig");
-const tpl_build_zon = @embedFile("templates/build.zig.zon");
-const tpl_gitignore = @embedFile("templates/gitignore");
-const tpl_readme_md = @embedFile("templates/README.md");
+const InitOptions = struct {
+    project_name: ?[]const u8 = null,
+    template_name: []const u8 = "exe",
+    list_only: bool = false,
+};
 
-const TemplateFile = struct { rel_path: []const u8, contents: []const u8 };
+// --------------------------------------------------------------------------
+// JSON output for `zpp explain --json` and `zpp explain --list --json`.
+//
+// Output is consumed by IDEs / tooling, so the format is fixed:
+//
+//   single-code mode:
+//     { "code": "Z####",
+//       "title": "<one-line description>",
+//       "summary": "<short fix-it hint, single line>",
+//       "explain": "<full multi-paragraph text>",
+//       "examples": [
+//         { "kind": "trigger" | "fix", "snippet": "..." },
+//         ...
+//       ]   <-- omitted entirely if heuristic parsing fails
+//     }
+//
+//   list mode:
+//     { "codes": [
+//         { "code": "Z####", "title": "...", "summary": "..." },
+//         ...
+//       ] }
+//
+//   unknown-code mode (also exit code 1):
+//     { "error": "unknown diagnostic code", "code": "<as typed>" }
+//
+// The parser for `examples` is a small heuristic over the existing
+// `explain(code)` text shape. Every entry today follows the pattern
+// `Triggers[ (...)]:` / `Fix[ (...)]:` followed by 4-space-indented code.
+// If any entry fails to parse cleanly we drop the `examples` field (rather
+// than emit a broken / partial array) so consumers can rely on the explain
+// text as the source of truth.
+// --------------------------------------------------------------------------
+
+fn renderCodeJsonAlloc(
+    allocator: std.mem.Allocator,
+    code: compiler.diagnostics.Code,
+) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try writeCodeJson(allocator, &aw.writer, code);
+    return aw.toOwnedSlice();
+}
+
+fn renderListJsonAlloc(allocator: std.mem.Allocator) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try writeListJson(&aw.writer);
+    return aw.toOwnedSlice();
+}
+
+fn renderUnknownJsonAlloc(
+    allocator: std.mem.Allocator,
+    requested: []const u8,
+) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try writeUnknownJson(&aw.writer, requested);
+    return aw.toOwnedSlice();
+}
+
+/// Write the JSON document for one diagnostic code into `writer`.
+/// `allocator` is used only for transient parsing / hint-flattening
+/// buffers and is fully released before returning.
+fn writeCodeJson(
+    allocator: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    code: compiler.diagnostics.Code,
+) !void {
+    var s: std.json.Stringify = .{ .writer = writer, .options = .{} };
+
+    const explain_text = compiler.diagnostics.explain(code);
+    const title = compiler.diagnostics.summary(code);
+
+    const summary_buf = try flattenHint(allocator, code);
+    defer allocator.free(summary_buf);
+
+    try s.beginObject();
+    try s.objectField("code");
+    try s.write(code.id());
+    try s.objectField("title");
+    try s.write(title);
+    try s.objectField("summary");
+    try s.write(summary_buf);
+    try s.objectField("explain");
+    try s.write(explain_text);
+
+    if (try parseExamples(allocator, explain_text)) |examples| {
+        defer {
+            for (examples) |ex| allocator.free(ex.snippet);
+            allocator.free(examples);
+        }
+        try s.objectField("examples");
+        try s.beginArray();
+        for (examples) |ex| {
+            try s.beginObject();
+            try s.objectField("kind");
+            try s.write(ex.kind);
+            try s.objectField("snippet");
+            try s.write(ex.snippet);
+            try s.endObject();
+        }
+        try s.endArray();
+    }
+
+    try s.endObject();
+}
+
+fn writeListJson(writer: *std.Io.Writer) !void {
+    var s: std.json.Stringify = .{ .writer = writer, .options = .{} };
+    try s.beginObject();
+    try s.objectField("codes");
+    try s.beginArray();
+    for (compiler.diagnostics.all_codes) |code| {
+        const title = compiler.diagnostics.summary(code);
+        try s.beginObject();
+        try s.objectField("code");
+        try s.write(code.id());
+        try s.objectField("title");
+        try s.write(title);
+        try s.objectField("summary");
+        try s.write(title);
+        try s.endObject();
+    }
+    try s.endArray();
+    try s.endObject();
+}
+
+fn writeUnknownJson(writer: *std.Io.Writer, requested: []const u8) !void {
+    var s: std.json.Stringify = .{ .writer = writer, .options = .{} };
+    try s.beginObject();
+    try s.objectField("error");
+    try s.write("unknown diagnostic code");
+    try s.objectField("code");
+    try s.write(requested);
+    try s.endObject();
+}
+
+/// Collapse a multi-line hint into a single line so it fits the JSON
+/// `summary` slot. Falls back to `summary(code)` when there is no hint.
+fn flattenHint(
+    allocator: std.mem.Allocator,
+    code: compiler.diagnostics.Code,
+) ![]u8 {
+    if (compiler.diagnostics.hint(code)) |h| {
+        var out = std.ArrayList(u8){};
+        defer out.deinit(allocator);
+        var prev_space = false;
+        for (h) |c| {
+            const ch: u8 = switch (c) {
+                '\n', '\r', '\t' => ' ',
+                else => c,
+            };
+            if (ch == ' ') {
+                if (!prev_space and out.items.len > 0) try out.append(allocator, ' ');
+                prev_space = true;
+            } else {
+                try out.append(allocator, ch);
+                prev_space = false;
+            }
+        }
+        // Trim trailing space.
+        while (out.items.len > 0 and out.items[out.items.len - 1] == ' ') {
+            _ = out.pop();
+        }
+        return out.toOwnedSlice(allocator);
+    }
+    return try allocator.dupe(u8, compiler.diagnostics.summary(code));
+}
+
+const Example = struct {
+    kind: []const u8, // "trigger" or "fix" — borrowed string literal, no free
+    snippet: []u8, // owned; caller frees
+};
+
+/// Heuristic parser over the explain-text shape. Looks for lines whose
+/// stripped form starts with `Triggers` or `Fix` and ends with `:`,
+/// then collects subsequent 4-space-indented lines as the snippet body.
+/// On any inconsistency returns `null`; the caller then omits the
+/// `examples` field so consumers cannot mistake a partial parse for the
+/// full set.
+fn parseExamples(
+    allocator: std.mem.Allocator,
+    text: []const u8,
+) !?[]Example {
+    var found = std.ArrayList(Example){};
+    errdefer {
+        for (found.items) |ex| allocator.free(ex.snippet);
+        found.deinit(allocator);
+    }
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var pending_kind: ?[]const u8 = null;
+    var snippet = std.ArrayList(u8){};
+    defer snippet.deinit(allocator);
+
+    while (lines.next()) |line| {
+        if (pending_kind) |kind| {
+            // Collect indented (4-space) lines or completely blank lines.
+            // A non-blank, non-indented line ends the snippet.
+            const is_blank = std.mem.indexOfNone(u8, line, " \t") == null;
+            const is_indented = line.len >= 4 and std.mem.eql(u8, line[0..4], "    ");
+            if (is_indented) {
+                if (snippet.items.len > 0) try snippet.append(allocator, '\n');
+                try snippet.appendSlice(allocator, line[4..]);
+            } else if (is_blank) {
+                // Blank lines inside a snippet are tolerated as separators
+                // until the next non-blank decides whether we are still in
+                // the snippet.
+                continue;
+            } else {
+                // Snippet ended. Save what we have (if any).
+                if (snippet.items.len > 0) {
+                    const owned = try snippet.toOwnedSlice(allocator);
+                    try found.append(allocator, .{ .kind = kind, .snippet = owned });
+                    snippet = .{};
+                }
+                pending_kind = null;
+                // Fall through so this same line can start a new section.
+            }
+        }
+        if (pending_kind == null) {
+            const stripped = std.mem.trim(u8, line, " \t");
+            if (stripped.len == 0) continue;
+            // Match `Triggers[...]:` or `Fix[...]:`. Anything else
+            // (e.g. `Or restructure...`, free prose) is ignored.
+            if (std.mem.startsWith(u8, stripped, "Triggers") and
+                std.mem.endsWith(u8, stripped, ":"))
+            {
+                pending_kind = "trigger";
+            } else if (std.mem.startsWith(u8, stripped, "Fix") and
+                std.mem.endsWith(u8, stripped, ":"))
+            {
+                pending_kind = "fix";
+            }
+        }
+    }
+    // Flush any trailing snippet.
+    if (pending_kind) |kind| {
+        if (snippet.items.len > 0) {
+            const owned = try snippet.toOwnedSlice(allocator);
+            try found.append(allocator, .{ .kind = kind, .snippet = owned });
+            snippet = .{};
+        }
+    }
+
+    if (found.items.len == 0) {
+        // Nothing parsed — the heuristic doesn't know what to do, so let
+        // the caller omit the field rather than emit `[]`.
+        found.deinit(allocator);
+        return null;
+    }
+    return try found.toOwnedSlice(allocator);
+}
+
+fn parseInitArgs(args: [][:0]u8) !InitOptions {
+    var opts = InitOptions{};
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "--list") or std.mem.eql(u8, a, "--templates")) {
+            opts.list_only = true;
+            continue;
+        }
+        if (std.mem.eql(u8, a, "--template") or std.mem.eql(u8, a, "-t")) {
+            if (i + 1 >= args.len) {
+                ePrint("zpp init: --template requires a value (one of: exe, lib, plugin)\n", .{});
+                return error.UsageError;
+            }
+            opts.template_name = args[i + 1];
+            i += 1;
+            continue;
+        }
+        if (std.mem.startsWith(u8, a, "--template=")) {
+            opts.template_name = a["--template=".len..];
+            continue;
+        }
+        if (std.mem.startsWith(u8, a, "-t=")) {
+            opts.template_name = a["-t=".len..];
+            continue;
+        }
+        if (std.mem.startsWith(u8, a, "-")) {
+            ePrint("zpp init: unknown option '{s}'\n", .{a});
+            return error.UsageError;
+        }
+        if (opts.project_name != null) {
+            ePrint("zpp init: too many positional arguments (got '{s}' after '{s}')\n", .{ a, opts.project_name.? });
+            return error.UsageError;
+        }
+        opts.project_name = a;
+    }
+    return opts;
+}
 
 fn cmdInit(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
-    if (args.len != 1) {
-        ePrint("zpp init: expected exactly one project name\n", .{});
-        return .usage_error;
+    const opts = parseInitArgs(args) catch return .usage_error;
+
+    if (opts.list_only) {
+        oPrint("Available templates for `zpp init --template <name>`:\n\n", .{});
+        for (init_templates.all_templates) |t| {
+            oPrint("  {s:<8}  {s}\n", .{ t.name, t.description });
+        }
+        oPrint("\nDefault: exe.\n", .{});
+        return .ok;
     }
-    const name = args[0];
+
+    const name = opts.project_name orelse {
+        ePrint("zpp init: expected a project name\n", .{});
+        ePrint("       run `zpp init --list` to see available templates.\n", .{});
+        return .usage_error;
+    };
     if (!isValidProjectName(name)) {
         ePrint("zpp init: '{s}' is not a valid project name (must match [A-Za-z][A-Za-z0-9_-]*)\n", .{name});
         return .user_error;
     }
+
+    const template = init_templates.findByName(opts.template_name) orelse {
+        ePrint("zpp init: unknown template '{s}'. Valid options:\n", .{opts.template_name});
+        for (init_templates.all_templates) |t| {
+            ePrint("    {s}  — {s}\n", .{ t.name, t.description });
+        }
+        return .user_error;
+    };
 
     // Refuse to clobber an existing directory.
     if (std.fs.cwd().access(name, .{})) |_| {
@@ -844,7 +1247,6 @@ fn cmdInit(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
     try std.fs.cwd().makePath(name);
     var dir = try std.fs.cwd().openDir(name, .{});
     defer dir.close();
-    try dir.makePath("src");
 
     // Pick a fingerprint deterministic per project name. The fingerprint is
     // free-form for unpublished packages; we just need a stable nonzero u64.
@@ -853,29 +1255,26 @@ fn cmdInit(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
     const fp_hex = try std.fmt.allocPrint(allocator, "{x}", .{fp});
     defer allocator.free(fp_hex);
 
-    const files = [_]TemplateFile{
-        .{ .rel_path = "src/main.zpp", .contents = tpl_main_zpp },
-        .{ .rel_path = "build.zig", .contents = tpl_build_zig },
-        .{ .rel_path = "build.zig.zon", .contents = tpl_build_zon },
-        .{ .rel_path = ".gitignore", .contents = tpl_gitignore },
-        .{ .rel_path = "README.md", .contents = tpl_readme_md },
-    };
-
-    for (files) |f| {
-        const rendered = try renderTemplate(allocator, f.contents, name, fp_hex);
-        defer allocator.free(rendered);
-        try dir.writeFile(.{ .sub_path = f.rel_path, .data = rendered });
+    for (template.files) |f| {
+        const rendered_path = try init_templates.render(allocator, f.path, name, fp_hex);
+        defer allocator.free(rendered_path);
+        const rendered_content = try init_templates.render(allocator, f.content, name, fp_hex);
+        defer allocator.free(rendered_content);
+        if (std.fs.path.dirname(rendered_path)) |sub| {
+            try dir.makePath(sub);
+        }
+        try dir.writeFile(.{ .sub_path = rendered_path, .data = rendered_content });
     }
 
     oPrint(
-        \\Scaffolded '{s}/'.
+        \\Scaffolded '{s}/' from template '{s}'.
         \\
         \\Next steps:
         \\    cd {s}
         \\    zig fetch --save git+https://github.com/nktkt/zigpp-lang
-        \\    zig build run
+        \\    zig build
         \\
-    , .{ name, name });
+    , .{ name, template.name, name });
     return .ok;
 }
 
@@ -887,32 +1286,6 @@ fn isValidProjectName(name: []const u8) bool {
         if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '-')) return false;
     }
     return true;
-}
-
-fn renderTemplate(allocator: std.mem.Allocator, src: []const u8, name: []const u8, fp_hex: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .{};
-    defer out.deinit(allocator);
-    var i: usize = 0;
-    while (i < src.len) {
-        if (substrAt(src, i, "ZPP_PROJECT_NAME")) {
-            try out.appendSlice(allocator, name);
-            i += "ZPP_PROJECT_NAME".len;
-            continue;
-        }
-        if (substrAt(src, i, "ZPP_PROJECT_FINGERPRINT")) {
-            try out.appendSlice(allocator, fp_hex);
-            i += "ZPP_PROJECT_FINGERPRINT".len;
-            continue;
-        }
-        try out.append(allocator, src[i]);
-        i += 1;
-    }
-    return out.toOwnedSlice(allocator);
-}
-
-fn substrAt(haystack: []const u8, at: usize, needle: []const u8) bool {
-    if (at + needle.len > haystack.len) return false;
-    return std.mem.eql(u8, haystack[at .. at + needle.len], needle);
 }
 
 fn termToExit(term: std.process.Child.Term) ExitCode {
@@ -974,12 +1347,40 @@ test "isValidProjectName accepts identifiers and rejects edge cases" {
     try std.testing.expect(!isValidProjectName("foo.bar"));
 }
 
-test "renderTemplate substitutes both placeholders" {
-    const a = std.testing.allocator;
-    const tpl = "name=ZPP_PROJECT_NAME, fp=0xZPP_PROJECT_FINGERPRINT;";
-    const out = try renderTemplate(a, tpl, "demo", "deadbeef");
-    defer a.free(out);
-    try std.testing.expectEqualStrings("name=demo, fp=0xdeadbeef;", out);
+test "parseInitArgs defaults to exe and accepts a project name" {
+    var name_buf: [4:0]u8 = .{ 'h', 'i', 'y', 'a' };
+    var args = [_][:0]u8{&name_buf};
+    const opts = try parseInitArgs(&args);
+    try std.testing.expectEqualStrings("hiya", opts.project_name.?);
+    try std.testing.expectEqualStrings("exe", opts.template_name);
+    try std.testing.expect(!opts.list_only);
+}
+
+test "parseInitArgs handles --template lib (long form, separate arg)" {
+    var name_buf: [4:0]u8 = .{ 'h', 'i', 'y', 'a' };
+    var flag_buf: [10:0]u8 = .{ '-', '-', 't', 'e', 'm', 'p', 'l', 'a', 't', 'e' };
+    var val_buf: [3:0]u8 = .{ 'l', 'i', 'b' };
+    var args = [_][:0]u8{ &flag_buf, &val_buf, &name_buf };
+    const opts = try parseInitArgs(&args);
+    try std.testing.expectEqualStrings("hiya", opts.project_name.?);
+    try std.testing.expectEqualStrings("lib", opts.template_name);
+}
+
+test "parseInitArgs handles -t plugin (short form)" {
+    var name_buf: [4:0]u8 = .{ 'h', 'i', 'y', 'a' };
+    var short_buf: [2:0]u8 = .{ '-', 't' };
+    var val_buf: [6:0]u8 = .{ 'p', 'l', 'u', 'g', 'i', 'n' };
+    var args = [_][:0]u8{ &short_buf, &val_buf, &name_buf };
+    const opts = try parseInitArgs(&args);
+    try std.testing.expectEqualStrings("plugin", opts.template_name);
+}
+
+test "parseInitArgs handles --list" {
+    var list_buf: [6:0]u8 = .{ '-', '-', 'l', 'i', 's', 't' };
+    var args = [_][:0]u8{&list_buf};
+    const opts = try parseInitArgs(&args);
+    try std.testing.expect(opts.list_only);
+    try std.testing.expect(opts.project_name == null);
 }
 
 test "Subcommand.parse covers init and explain" {
@@ -1125,4 +1526,112 @@ test "snapshotChanged detects new file and updates prev" {
     const after_add = try snapshotChanged(a, &roots, &snap);
     try std.testing.expect(after_add);
     try std.testing.expectEqual(@as(usize, 2), snap.count());
+}
+
+// --------------------------------------------------------------------------
+// `zpp explain --json` helpers — driven through their writer-buffer entry
+// points (renderXxxJsonAlloc) so we don't go through stdout. The
+// `zig test --listen=-` IPC chokes on direct stdout writes, so every test
+// here serializes into an allocator-backed buffer and parses it with
+// `std.json.parseFromSlice` to assert validity + shape.
+// --------------------------------------------------------------------------
+
+test "explain --json single code emits parseable JSON with right code field" {
+    const a = std.testing.allocator;
+
+    const json_text = try renderCodeJsonAlloc(a, .z0030_effect_violation);
+    defer a.free(json_text);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, json_text, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    try std.testing.expectEqualStrings("Z0030", root.get("code").?.string);
+    // Title comes from summary(code) — the first line of explain() with the
+    // "Z####: " prefix stripped.
+    try std.testing.expect(root.get("title").?.string.len > 0);
+    try std.testing.expect(root.get("summary").?.string.len > 0);
+    try std.testing.expect(root.get("explain").?.string.len > 50);
+    // Z0030 has both `Triggers:` (with snippet) and a prose `Fix: drop ...`,
+    // so the parser should produce exactly one example (the trigger).
+    const examples = root.get("examples").?.array;
+    try std.testing.expect(examples.items.len >= 1);
+    try std.testing.expectEqualStrings("trigger", examples.items[0].object.get("kind").?.string);
+}
+
+test "explain --json --list emits parseable JSON with all codes" {
+    const a = std.testing.allocator;
+
+    const json_text = try renderListJsonAlloc(a);
+    defer a.free(json_text);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, json_text, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    const codes = root.get("codes").?.array;
+    // Spec only requires "at least 5". Today we have 16; allow growth.
+    try std.testing.expect(codes.items.len >= 5);
+    // Each entry has the contracted shape.
+    for (codes.items) |entry| {
+        const obj = entry.object;
+        const code_val = obj.get("code").?.string;
+        try std.testing.expect(std.mem.startsWith(u8, code_val, "Z"));
+        try std.testing.expect(obj.get("title").?.string.len > 0);
+        try std.testing.expect(obj.get("summary").?.string.len > 0);
+    }
+}
+
+test "explain --json unknown code emits error JSON doc" {
+    const a = std.testing.allocator;
+
+    const json_text = try renderUnknownJsonAlloc(a, "Zxxxx");
+    defer a.free(json_text);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, json_text, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    try std.testing.expectEqualStrings("unknown diagnostic code", root.get("error").?.string);
+    try std.testing.expectEqualStrings("Zxxxx", root.get("code").?.string);
+}
+
+test "explain --json escapes control characters and quotes" {
+    const a = std.testing.allocator;
+    // The unknown-code path passes the requested string through verbatim,
+    // so we use it to spot-check that std.json.Stringify escapes properly.
+    const json_text = try renderUnknownJsonAlloc(a, "weird \"\n\\quote");
+    defer a.free(json_text);
+
+    // Re-parse must succeed and round-trip the bytes.
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, json_text, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(
+        "weird \"\n\\quote",
+        parsed.value.object.get("code").?.string,
+    );
+}
+
+test "parseExamples extracts trigger and fix snippets from a known code" {
+    const a = std.testing.allocator;
+    const text = compiler.diagnostics.explain(.z0021_borrow_invalidated_by_move);
+    const examples = (try parseExamples(a, text)) orelse @panic("expected examples");
+    defer {
+        for (examples) |ex| a.free(ex.snippet);
+        a.free(examples);
+    }
+    // Z0021 has `Triggers:` then `Fix (let the borrow end first):` — both
+    // followed by indented code — so we expect exactly two entries.
+    try std.testing.expectEqual(@as(usize, 2), examples.len);
+    try std.testing.expectEqualStrings("trigger", examples[0].kind);
+    try std.testing.expectEqualStrings("fix", examples[1].kind);
+    try std.testing.expect(examples[0].snippet.len > 0);
+    try std.testing.expect(examples[1].snippet.len > 0);
+}
+
+test "flattenHint produces a single-line summary" {
+    const a = std.testing.allocator;
+    const flat = try flattenHint(a, .z0010_missing_deinit_on_owned);
+    defer a.free(flat);
+    try std.testing.expect(flat.len > 0);
+    try std.testing.expect(std.mem.indexOfScalar(u8, flat, '\n') == null);
 }

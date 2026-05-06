@@ -40,7 +40,7 @@ pub const WhereClause = struct {
     span: diag.Span,
 };
 
-pub const EffectKind = enum { alloc, noalloc, io, noio, panic, nopanic, custom, nocustom };
+pub const EffectKind = enum { alloc, noalloc, io, noio, panic, nopanic, @"async", noasync, custom, nocustom };
 
 pub const Effect = struct {
     kind: EffectKind,
@@ -135,6 +135,11 @@ pub const TraitMethod = struct {
     name: StringSlice,
     params: []Param,
     return_type: StringSlice,
+    /// Optional default body. When present, this is the verbatim source
+    /// text *between* the surrounding braces (exclusive). An empty slice
+    /// here still means "has a default body" (specifically, an empty one);
+    /// `null` means signature-only and impls must supply a body.
+    body: ?StringSlice = null,
     span: diag.Span,
 };
 

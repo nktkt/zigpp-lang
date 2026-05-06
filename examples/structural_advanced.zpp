@@ -1,0 +1,89 @@
+/// structural_advanced.zpp — `Greeter` trait with a multi-parameter method,
+/// dispatched through `impl Trait` against two unrelated implementations.
+///
+/// Teaches: trait methods aren't limited to `fn (self) ...` — they can take
+/// any number of additional parameters. The compiler injects every impl
+/// method into the target struct's body, so `who.greet(name, count)`
+/// resolves through normal Zig method lookup. Each call site of
+/// `welcome(impl Greeter, ...)` is monomorphized to the concrete type.
+///
+/// (Note: this example originally targeted *structural* traits — opt-in
+/// duck typing — but that feature has not landed on this branch. We
+/// instead exercise multi-param trait dispatch, which is also a less
+/// covered surface.)
+///
+/// Lowered Zig sketch:
+///     const Tweet = struct {
+///         handle: []const u8,
+///         pub fn greet(self: *@This(), name: []const u8, count: usize) void { ... }
+///     };
+///     const Loud = struct {
+///         prefix: []const u8,
+///         pub fn greet(self: *@This(), name: []const u8, count: usize) void { ... }
+///     };
+///     fn welcome(who: anytype, name: []const u8, count: usize) void {
+///         who.greet(name, count);
+///     }
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+trait Greeter {
+    fn greet(self, name: []const u8, count: usize) void;
+}
+
+// A Twitter-style greeter that truncates the user's name to keep the post
+// short, regardless of how many times we ask it to greet.
+const Tweet = struct {
+    handle: []const u8,
+};
+
+// A loud greeter that repeats the greeting `count` times with a prefix.
+const Loud = struct {
+    prefix: []const u8,
+};
+
+impl Greeter for Tweet {
+    fn greet(self, name: []const u8, count: usize) void {
+        // Tweet ignores `count` (microblog has no patience for repeats) and
+        // truncates the name to 4 chars to leave room for @-mention + hash.
+        _ = count;
+        const max_len: usize = 4;
+        const trimmed = if (name.len > max_len) name[0..max_len] else name;
+        std.debug.print("@{s}: hi {s}{s} #zpp\n", .{
+            self.handle,
+            trimmed,
+            if (name.len > max_len) "…" else "",
+        });
+    }
+}
+
+impl Greeter for Loud {
+    fn greet(self, name: []const u8, count: usize) void {
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            std.debug.print("{s} HELLO {s}!!!\n", .{ self.prefix, name });
+        }
+    }
+}
+
+fn welcome(who: impl Greeter, name: []const u8, count: usize) void {
+    who.greet(name, count);
+}
+
+pub fn main() !void {
+    var t = Tweet{ .handle = "ada_lovelace" };
+    var l = Loud{ .prefix = ">>>" };
+
+    // Two unrelated structs, same trait method shape, dispatched through
+    // a single generic `welcome` fn — monomorphized once per concrete type.
+    welcome(&t, "Alexandra", 3);
+    welcome(&l, "Linus", 3);
+
+    // Direct method-style dispatch also works because `impl` injects the
+    // method into the target struct.
+    t.greet("Bob", 99);
+    l.greet("Joe", 1);
+
+    std.debug.print("(multi-param trait dispatch: same `greet(name, count)` shape, two behaviours)\n", .{});
+}

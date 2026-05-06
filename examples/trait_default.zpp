@@ -1,0 +1,50 @@
+/// trait_default.zpp — demonstrates trait methods with default bodies.
+///
+/// `Greeter` declares two methods:
+///   * `name`  — signature only; every impl must provide it (else Z0040).
+///   * `greet` — has a default body. Impls may omit it, in which case
+///               the trait's default body is wired into the vtable.
+///
+/// `Friendly` only implements `name`. Calls through `dyn Greeter` reach
+/// the default body via `Greeter_default_greet`. Calls to `name()` go
+/// straight through the per-impl thunk.
+///
+/// Lowered Zig sketch:
+///     fn Greeter_default_greet(self: *anyopaque) void { ... }
+///     pub const Greeter_impl_for_Friendly: Greeter_VTable = .{
+///         .name  = Greeter_name_for_Friendly,
+///         .greet = Greeter_default_greet, // fallback
+///     };
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+trait Greeter {
+    fn name(self) []const u8;
+    fn greet(self) void {
+        std.debug.print("hello from default\n", .{});
+    }
+}
+
+const Friendly = struct {
+    label: []const u8,
+};
+
+impl Greeter for Friendly {
+    fn name(self) []const u8 {
+        return self.label;
+    }
+}
+
+pub fn main() !void {
+    var f = Friendly{ .label = "Ada" };
+
+    // Static dispatch: `name` resolves through Zig method lookup.
+    std.debug.print("name = {s}\n", .{f.name()});
+
+    // Dynamic dispatch: the impl omitted `greet`, so the vtable slot
+    // holds `Greeter_default_greet`. Calling through `dyn Greeter`
+    // executes the trait's default body.
+    const dyn_g = zpp.Dyn(Greeter_VTable).init(Friendly, &f, &Greeter_impl_for_Friendly);
+    dyn_g.vtable.greet(dyn_g.ptr);
+}
