@@ -5,7 +5,7 @@
 /// payload.
 ///
 /// Teaches: how the constructs compose. The bus owns its handler vector,
-/// each `Event` is a derived struct (so we can hash it), `dispatch` is a
+/// each `Event` is a derived struct (so we can hash it), `publish` is a
 /// guarded entry point (`requires(name.len > 0)`).
 ///
 /// Lowered Zig sketch (abbreviated):
