@@ -33,6 +33,7 @@ pub const Span = struct {
 /// Diagnostic codes. The numeric ranges map to phase:
 ///   Z00xx — sema (trait/owned/move/effect)
 ///     Z0001 unknown trait
+///     Z0002 structural trait method missing on type
 ///     Z0010 owned struct missing deinit
 ///     Z0011 `using` target lacks deinit
 ///     Z0020 use after move
@@ -46,6 +47,7 @@ pub const Span = struct {
 ///   Z03xx — lower
 pub const Code = enum {
     z0001_unknown_trait,
+    z0002_structural_violation,
     z0010_missing_deinit_on_owned,
     z0011_using_type_lacks_deinit,
     z0020_use_after_move,
@@ -65,6 +67,7 @@ pub const Code = enum {
     pub fn id(self: Code) []const u8 {
         return switch (self) {
             .z0001_unknown_trait => "Z0001",
+            .z0002_structural_violation => "Z0002",
             .z0010_missing_deinit_on_owned => "Z0010",
             .z0011_using_type_lacks_deinit => "Z0011",
             .z0020_use_after_move => "Z0020",
@@ -90,6 +93,7 @@ pub const Code = enum {
 pub fn hint(code: Code) ?[]const u8 {
     return switch (code) {
         .z0001_unknown_trait => "declare the trait before any `impl` or `dyn` reference:\n  trait Name { fn method(self) void; }",
+        .z0002_structural_violation => "structural traits are satisfied by matching method shapes. The impl block listed a method that does not exist on the target type — add the method to the type's definition, or remove the entry from the impl block.",
         .z0010_missing_deinit_on_owned => "owned structs must release their resources explicitly. Add:\n  pub fn deinit(self: *@This()) void {\n      // free anything held by `self`, then leave it in a moved-from state.\n  }",
         .z0011_using_type_lacks_deinit => "give the type a `deinit` method, or drop the `using` binding so the compiler does not try to auto-release it.",
         .z0020_use_after_move => "the value was consumed by `move`. Rebind it (`own var x = ...`) or restructure the code to keep a single owner.",
@@ -126,6 +130,38 @@ pub fn explain(code: Code) []const u8 {
         \\Fix:
         \\    trait Greeter { fn greet(self) void; }
         \\    fn dispatch(g: dyn Greeter) void { g.vtable.greet(g.ptr); }
+        ,
+        .z0002_structural_violation =>
+        \\Z0002: structural trait method missing on type
+        \\
+        \\Traits declared with `: structural` are satisfied by *matching method
+        \\shapes* on the target type — no explicit `impl` block is required.
+        \\When you do write `impl T for X { ... }` for a structural T, every
+        \\method named in the impl block must correspond to an existing method
+        \\on X (the impl block re-exports those methods through the trait's
+        \\vtable). Missing-from-the-trait methods are allowed (that's the whole
+        \\point of structural), but missing-from-the-type methods are not.
+        \\
+        \\Note that this is the dual of Z0040 — Z0040 fires when a *nominal*
+        \\impl is missing methods the trait requires; Z0002 fires when a
+        \\*structural* impl is missing methods on the type the impl wants to
+        \\re-export.
+        \\
+        \\Triggers:
+        \\    trait Greeter : structural { fn greet(self) void; }
+        \\    const Friendly = struct { name: []const u8 };
+        \\    impl Greeter for Friendly {
+        \\        fn greet(self) void { _ = self; }   // Friendly has no greet method
+        \\    }
+        \\
+        \\Fix: add the listed method(s) to the struct definition, or drop the
+        \\impl block entirely (structural traits don't need one). For example:
+        \\
+        \\    const Friendly = struct {
+        \\        name: []const u8,
+        \\        pub fn greet(self: *@This()) void { _ = self; }
+        \\    };
+        \\    // No impl block required — structural traits pick this up.
         ,
         .z0010_missing_deinit_on_owned =>
         \\Z0010: owned struct missing deinit

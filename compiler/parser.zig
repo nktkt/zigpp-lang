@@ -231,6 +231,20 @@ pub const Parser = struct {
     fn parseTrait(self: *Parser, is_pub: bool, start: u32) !ast.TraitDecl {
         _ = try self.expect(.kw_trait, "trait decl");
         const name_tok = try self.expect(.ident, "trait name");
+
+        // Optional `: structural` modifier after the trait name.
+        // We accept any identifier after the colon for forward-compat
+        // (only `structural` flips the flag today; future kinds may
+        // appear here without breaking older code).
+        var is_structural = false;
+        if (self.match(.colon)) {
+            const kind_tok = try self.expect(.ident, "trait kind");
+            const kind_text = kind_tok.slice(self.source);
+            if (std.mem.eql(u8, kind_text, "structural")) {
+                is_structural = true;
+            }
+        }
+
         _ = try self.expect(.l_brace, "trait body");
 
         var methods: std.ArrayList(ast.TraitMethod) = .{};
@@ -245,6 +259,7 @@ pub const Parser = struct {
             .name = name_tok.slice(self.source),
             .methods = owned,
             .is_pub = is_pub,
+            .is_structural = is_structural,
             .span = .{ .start = start, .end = close.span.end },
         };
     }

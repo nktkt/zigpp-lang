@@ -147,6 +147,13 @@ pub const TraitDecl = struct {
     name: StringSlice,
     methods: []TraitMethod,
     is_pub: bool,
+    /// Set when the trait is declared with `: structural` after the name
+    /// (e.g. `trait Foo : structural { ... }`). Structural traits relax the
+    /// Z0040 check: an `impl T for X` for a structural T may omit methods,
+    /// because the type is allowed to satisfy them via its own definition.
+    /// Methods that *are* listed in the impl block must still match an
+    /// existing method on X — otherwise sema emits Z0002.
+    is_structural: bool = false,
     span: diag.Span,
 };
 
@@ -285,6 +292,7 @@ test "ast tagged unions construct" {
         .name = "Writer",
         .methods = methods,
         .is_pub = false,
+        .is_structural = false,
         .span = .empty(),
     };
     const decl: TopDecl = .{ .trait = td };

@@ -1,0 +1,12 @@
+trait Greeter : structural {
+    fn greet(self) []const u8;
+}
+
+struct Hello {}
+
+impl Greeter for Hello {
+    fn greet(self) []const u8 {
+        _ = self;
+        return "hello";
+    }
+}

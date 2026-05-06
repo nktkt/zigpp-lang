@@ -1,0 +1,52 @@
+/// structural_trait.zpp — opt-in structural traits.
+///
+/// Teaches: `trait Foo : structural { ... }` declares a trait that any type
+/// can satisfy *without* an explicit `impl Foo for Type` block — the type
+/// only needs methods of the right shape. Nominal traits (the default) still
+/// require an `impl` block, so structural is purely a relaxation.
+///
+/// In this example `Greeter` is structural. The `English` struct provides a
+/// `greet` method directly on its body and can be passed to `welcome` even
+/// though the file contains no `impl Greeter for English { ... }` block.
+/// `Japanese` does the same — both static-dispatch through `welcome`'s
+/// `impl Greeter` parameter.
+///
+/// Lowering: a structural trait lowers identically to a nominal one (same
+/// `*_VTable` + `zpp.Dyn(...)` alias). The structural relaxation is purely
+/// a sema-time check (Z0040 is suppressed; Z0002 fires only when an opt-in
+/// `impl` block re-exports a method that doesn't exist on the target type).
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+trait Greeter : structural {
+    fn greet(self) void;
+}
+
+const English = struct {
+    name: []const u8,
+    pub fn greet(self: *@This()) void {
+        std.debug.print("Hello, {s}!\n", .{self.name});
+    }
+};
+
+const Japanese = struct {
+    name: []const u8,
+    pub fn greet(self: *@This()) void {
+        std.debug.print("こんにちは、{s}さん!\n", .{self.name});
+    }
+};
+
+fn welcome(who: impl Greeter) void {
+    who.greet();
+}
+
+pub fn main() !void {
+    var en = English{ .name = "Ada" };
+    var jp = Japanese{ .name = "三郎" };
+
+    welcome(&en);
+    welcome(&jp);
+
+    std.debug.print("(structural dispatch: no `impl Greeter for ...` blocks needed)\n", .{});
+}
