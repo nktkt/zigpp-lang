@@ -1,0 +1,59 @@
+/// effects_noasync.zpp — `.noasync` capability denial.
+///
+/// Teaches: alongside `.noalloc` / `.noio` / `.nopanic`, Zig++ has a
+/// fourth denial axis `.noasync`. A fn declared `effects(.noasync)`
+/// must not start a thread, schedule a `TaskGroup` task, await, or
+/// suspend. Sema's heuristic scans the body for the explicit Zig++
+/// concurrency primitives (`zpp.async_mod.TaskGroup`, `JoinHandle`,
+/// `CancellationToken`, `spawnWithToken`) and the std-lib threading
+/// surface (`std.Thread.spawn`, `std.Thread.yield`); any hit triggers
+/// `.async` in the inferred set, which contradicts `.noasync` and
+/// fires Z0030 at compile time.
+///
+/// Lowered Zig sketch:
+///     // effect annotations are erased after sema; `quiet_hash` lowers
+///     // to a plain Zig fn, the lint pass having confirmed the body is
+///     // free of any concurrency primitive.
+///     fn quiet_hash(bytes: []const u8) u64 { ... }
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
+
+fn quiet_hash(bytes: []const u8) u64 effects(.noasync) {
+    // Pure arithmetic — no spawn, no await, no suspend. The `.noasync`
+    // annotation is honoured and the lowering is a plain Zig fn.
+    var h: u64 = FNV_OFFSET;
+    for (bytes) |b| {
+        h ^= b;
+        h *%= FNV_PRIME;
+    }
+    return h;
+}
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    _ = allocator;
+
+    const h = quiet_hash("the quick brown fox");
+    std.debug.print("quiet_hash(\"the quick brown fox\") = {x}\n", .{h});
+    std.debug.print("(quiet_hash is .noasync; the body is pure arithmetic)\n", .{});
+
+    // ----------------------------------------------------------------
+    // Z0030 — uncomment to see the inference-based check fire:
+    //
+    //     fn lying(al: std.mem.Allocator) !void effects(.noasync) {
+    //         var g = zpp.async_mod.TaskGroup.init(al);
+    //         defer g.deinit();
+    //         try g.join();
+    //     }
+    //
+    // The body mentions `TaskGroup`, so inference deduces the `.async`
+    // effect; the `.noasync` annotation contradicts it, and sema emits
+    //   error: Z0030 fn declared .noasync but inferred .async effect
+    // ----------------------------------------------------------------
+}

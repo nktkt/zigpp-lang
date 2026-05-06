@@ -22,10 +22,12 @@ no implicit destructors, and no exceptions**. `.zpp` source compiles to
 
 ## Status
 
-Pre-alpha (v0.1). Compiler frontend, runtime library, CLI tools, VS Code
-extension, fuzz harness, and end-to-end test rig are all in place. The
-language surface is intentionally small and stable enough to write
-working programs against. Expect breakage at the syntax-edge cases.
+Pre-alpha (v0.2). The v0.2 push landed structural traits, trait method
+default bodies, the `.noasync` effect axis, the `Writer` stdlib trait,
+TaskGroup cancellation, the `zpp explain --json` /
+`zpp init --template` subcommands, `build.zpp`, and the full LSP feature
+set — language surface is still intentionally small but covers more
+ground end-to-end.
 
 ## Quick example
 
@@ -35,8 +37,10 @@ const zpp = @import("zpp");
 
 trait Greeter {
     fn greet(self) void;
+    fn shout(self) void { self.greet(); }   // default body
 }
 
+derive(.{ Hash, Eq, Debug })
 const English = struct {
     name: []const u8,
 };
@@ -47,7 +51,7 @@ impl Greeter for English {
     }
 }
 
-fn welcome(who: impl Greeter) void {
+fn welcome(who: impl Greeter) void effects(.noalloc) {
     who.greet();
 }
 
@@ -76,17 +80,25 @@ zpp lower examples/hello_trait.zpp
   - `fn f(x: impl Trait)` → static (Zig `anytype`, monomorphized)
   - `fn f(x: dyn Trait)` → dynamic (visible `zpp.Dyn(VTable)` fat pointer)
   - `extern interface Foo { ... }` → C-ABI (`extern struct Foo_ABI` with `callconv(.c)`)
+- **Structural traits** — `trait Foo : structural { ... }` matches by shape, not by name. A nominal `impl` is no longer required when every method exists on the type; sema flags shape mismatches with Z0002.
+- **Trait method default bodies** — `fn name(self) T { body }` inside `trait` provides a fallback. `impl` blocks may omit defaulted methods; only abstract methods are required (Z0040 still catches missing required ones).
+- **Trait arity 0..16** — trait methods accept up to 16 parameters (was 5); the vtable validator scales accordingly.
 - **`using x = expr;`** — explicit RAII binder, lowers to `var x = expr; defer x.deinit();`
 - **`owned struct`** — must-deinit checked by sema; missing `deinit` → diagnostic Z0010
 - **`own var x`** + **`move x`** — affine ownership with use-after-move detection (Z0020) and a multi-borrow + block-scope-aware borrow checker (Z0021)
 - **`requires(cond)` / `ensures(cond)`** — runtime contracts via `zpp.contract.*`; `ensures` runs on every scope exit via `defer`
-- **`effects(.noalloc)` / `.noio` / `.nopanic` / `.nocustom("X")`** — bottom-up effect inference. A fn that calls `a.alloc(...)` is inferred `.alloc`; declaring `.noalloc` on a fn whose inferred set contains `.alloc` fires Z0030. User-defined `.custom("X")` effects propagate one round through same-file callees (Z0060). `@effectsOf(f)` exposes the inferred set as a comptime `[]const u8`.
-- **`derive(.{ Hash, Eq, Ord, Default, Clone, Debug, Json, Iterator, Serialize, Compare, FromStr })`** — comptime helpers injected as struct methods so `a.hash()`, `User.eq(a, b)`, `a.iter()`, `a.serialize(arena)`, `User.fromStr(s, arena)`, and `User.lt(a, b)` work directly
+- **`effects(...)` across 5 axes** — `.noalloc` / `.noio` / `.nopanic` / `.noasync` / `.nocustom("X")`, with bottom-up inference. A fn that calls `a.alloc(...)` is inferred `.alloc`; declaring `.noalloc` on a fn whose inferred set contains `.alloc` fires Z0030. The `.async` axis (round 6) tracks suspending callees the same way. User-defined `.custom("X")` effects propagate one round through same-file callees (Z0060). `@effectsOf(f)` exposes the inferred set as a comptime `[]const u8`.
+- **`derive(.{ Hash, Eq, Ord, Default, Clone, Debug, Json, Iterator, Serialize, Compare, FromStr })`** — 11 comptime helpers injected as struct methods so `a.hash()`, `User.eq(a, b)`, `a.iter()`, `a.serialize(arena)`, `User.fromStr(s, arena)`, and `User.lt(a, b)` work directly
+- **`Writer` trait** — Phase 2 stdlib closure: `lib/` ships a `Writer` trait that wraps `std.Io.Writer` so `derive(.Debug)` / `derive(.Serialize)` and user code share one named sink
+- **`TaskGroup` with cancellation** — `cancel()`, `spawnWithToken(tok, fn)`, and a watchdog that auto-cancels on deadline propagate cancellation across in-flight tasks; `JoinHandle(T)` surfaces the cancelled state to joiners
 - **`where T: Trait`** — generic constraint syntax (informational, drops at lowering)
 - **`\\`-prefixed multi-line strings** — pass through to lowered Zig verbatim, just like the underlying `\\` syntax
 - **End-to-end pipeline** verified: 10+ example programs compile and run through `zpp run` AND `zig build e2e`
 - **Fuzz-clean**: 83,000+ generated/mutated inputs through the parser/sema/lowerer with zero panics, leaks, or timeouts
-- **Full IDE feature set via `zpp-lsp`**: hover-with-explain, go-to-definition, find references, workspace symbol search, rename, document symbol (Outline view), keyword + decl-name completion, code-action quick-fixes (Explain Z####), and semantic tokens (`/full`, `/range`, and `/full/delta`)
+- **Full IDE feature set via `zpp-lsp`**: hover-with-explain, go-to-definition, find references, workspace symbol search, rename, document symbol (Outline view), keyword + decl-name completion, code-action quick-fixes (Explain Z####), semantic tokens (`/full`, `/range`, `/full/delta`), `inlayHint`, `foldingRange`, `implementation`, `callHierarchy`, and `codeLens`
+- **CLI subcommands**: `zpp build / run / lower / fmt / check / watch / doc / migrate / lsp / init / explain`, plus v0.2 additions: `zpp explain --json` (machine-readable diagnostic explainer for IDEs) and `zpp init --template lib | exe | plugin` (three project scaffolds)
+- **`build.zpp`** — thin alias over `build.zig`. Drop a `build.zpp` next to your sources and the driver lowers it before invoking `zig build`.
+- **Migrate +5 patterns** — `zpp-migrate` recognises five additional `.zig` idioms (arena-scoped `defer`, manual vtable structs, `errdefer`-paired `init`, and two more) and emits `.zpp` rewrites
 
 ## Layout
 
@@ -95,15 +107,20 @@ zigpp/
   build.zig            build script (artifacts, tests, examples, e2e, fuzz)
   build.zig.zon        package manifest
   compiler/            .zpp -> .zig frontend (token, ast, parser, sema, lower, diagnostics)
-  lib/                 zpp runtime library (Dyn, Owned, contracts, derive, async, traits, testing)
-  tools/               zpp CLI plus fmt, lsp, doc, migrate
-  examples/            11 .zpp programs covering each construct
+  lib/                 zpp runtime library (Dyn, Owned, contracts, derive, async, traits, Writer, testing)
+  tools/               zpp CLI plus fmt, lsp, doc, migrate (with templates/ for `init --template`)
+  examples/            .zpp programs covering each construct, including build_zpp/, multi_file/, cli/
+  examples-consumer/   sample downstream Zig project that imports the `zpp` runtime via `zig fetch`
+  bench/               microbenchmarks (dispatch, derive, TaskGroup)
   tests/               compile, diagnostic, snapshot, behavior, no-hidden-alloc, fuzz
-  vscode/              VS Code extension (TextMate grammar + LSP client)
+  vscode/              VS Code extension (TextMate grammar + LSP client + snippets)
+  docs/                mdBook documentation source (deployed to GitHub Pages)
   README.md            this file
+  README.ja.md         Japanese mirror
   MANIFESTO.md         design philosophy and rejections
   LANGUAGE.md          language spec sketch with lowering rules
   ROADMAP.md           phased roadmap
+  CHANGELOG.md         release-please-managed changelog
   LICENSE              MIT
 ```
 
@@ -122,12 +139,16 @@ zig build run -- help        # invoke the zpp CLI
 The CLIs install under `zig-out/bin/`:
 
 ```
-zpp            main driver: build, run, lower, fmt, check, doc, migrate, lsp
+zpp            main driver: build, run, lower, fmt, check, watch, doc, migrate,
+               lsp, init, explain
 zpp-fmt        formatter
 zpp-lsp        LSP server (stdin/stdout JSON-RPC; used by the VS Code extension)
 zpp-doc        markdown doc generator
 zpp-migrate    .zig -> .zpp migration helper
 ```
+
+`zpp explain Z0030 --json` emits a structured payload for IDE consumers.
+`zpp init --template lib | exe | plugin` picks the scaffold shape.
 
 ## Start a new project
 
@@ -163,10 +184,12 @@ exe.root_module.addImport("zpp", zpp_dep.module("zpp"));
 ```
 
 The runtime exposes `Dyn`, `Owned`, `ArenaScope`, `contract.requires`,
-`derive.Hash/Eq/Debug/Json`, and a `std.Thread`-backed concurrent
-`TaskGroup` with typed `JoinHandle(T)`. The compiler frontend is also
-importable as `zpp_compiler` if you need to embed the lowering pipeline
-programmatically.
+`derive.Hash/Eq/Ord/Default/Clone/Debug/Json/Iterator/Serialize/Compare/FromStr`,
+the `Writer` trait, and a `std.Thread`-backed concurrent `TaskGroup`
+with typed `JoinHandle(T)` and cooperative cancellation
+(`cancel()` / `spawnWithToken()` / watchdog). The compiler frontend is
+also importable as `zpp_compiler` if you need to embed the lowering
+pipeline programmatically.
 
 ## Editor support
 
@@ -179,8 +202,9 @@ cd vscode && npm install && npm run compile
 
 The extension provides syntax highlighting (TextMate + LSP semantic
 tokens), diagnostics, completion, hover-with-explain, go-to-definition,
-find references, workspace symbol search, rename, Outline view, code
-actions, and `Zig++: Run File` / `Zig++: Show Lowered Zig` commands.
+find references, workspace symbol search, rename, Outline view, inlay
+hints, folding ranges, go-to-implementation, call hierarchy, code lens,
+code actions, and `Zig++: Run File` / `Zig++: Show Lowered Zig` commands.
 
 Other LSP clients (Vim/Neovim, Emacs, Helix) can point directly at the
 `zpp-lsp` binary on stdio — every IDE-side feature above ships from the
@@ -201,9 +225,11 @@ for syntax and lowering rules.
 
 Phased. See [ROADMAP.md](ROADMAP.md) and [docs/src/v0.2-plan.md](docs/src/v0.2-plan.md).
 Today the core (Phases 0–4) is working end-to-end. Phase 5 (effect
-inference) is **landed in five rounds**: `.alloc`, `.io`, `.panic`,
-`@effectsOf(f)` queryable, and `.custom("X")` user-defined effects.
-Phase 7 (real concurrency) is the active TaskGroup runtime.
+inference) has now landed in **six rounds**: `.alloc`, `.io`, `.panic`,
+`@effectsOf(f)` queryable, `.custom("X")` user-defined effects, and the
+new `.async` axis. Phase 7 (real concurrency) is the active TaskGroup
+runtime, now with cooperative `cancel()` / `spawnWithToken()` /
+watchdog-based cancellation propagation.
 
 ## Contributing
 
