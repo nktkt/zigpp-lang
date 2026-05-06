@@ -117,7 +117,8 @@ zpp lower examples/hello_trait.zpp
   (`/full`、`/range`、`/full/delta`)、`inlayHint`、`foldingRange`、
   `implementation`、`callHierarchy`、`codeLens`
 - **CLI サブコマンド**: `zpp build / run / lower / fmt / check / watch / doc /
-  migrate / lsp / init / explain` に加え、v0.2 で追加された
+  migrate / test / lsp / init / explain` に加え、v0.2 で追加された
+  `zpp test` (各 `.zpp` を lower し `zig test` で実行)、
   `zpp explain --json` (IDE 向け機械可読 diagnostic explainer)、
   `zpp init --template lib | exe | plugin` (3 種のプロジェクトひな形)
 - **`build.zpp`** — `build.zig` の薄いエイリアス。ソース横に `build.zpp` を
@@ -137,7 +138,7 @@ zigpp/
   tools/               zpp CLI + fmt / lsp / doc / migrate (init --template 用 templates/ を含む)
   examples/            各構文要素を網羅した .zpp プログラム (build_zpp/, multi_file/, cli/ を含む)
   examples-consumer/   `zig fetch` で `zpp` ランタイムを取り込む下流の Zig プロジェクト例
-  bench/               マイクロベンチ (dispatch / derive / TaskGroup)
+  bench/               マイクロベンチ (compileToString: parse + sema + lower)
   tests/               compile / diagnostic / snapshot / behavior / no-hidden-alloc / fuzz
   vscode/              VS Code 拡張 (TextMate grammar + LSP client + snippets)
   docs/                mdBook ドキュメントソース (GitHub Pages へデプロイ)
@@ -166,13 +167,14 @@ zig build run -- help        # zpp CLI を呼ぶ
 
 ```
 zpp            メインドライバ: build / run / lower / fmt / check / watch / doc /
-               migrate / lsp / init / explain
+               migrate / test / lsp / init / explain
 zpp-fmt        フォーマッタ
 zpp-lsp        LSP サーバ (stdio JSON-RPC、VS Code 拡張から使用)
 zpp-doc        Markdown ドキュメント生成
 zpp-migrate    .zig -> .zpp 移行ヘルパー
 ```
 
+`zpp test [paths...]` は各 `.zpp` を `.zpp-cache/<rel>.zig` に lower し、それぞれに `zig test` を走らせます (`--filter <p>` / `--release` / `-v`)。
 `zpp explain Z0030 --json` は IDE 向けの構造化ペイロードを出力します。
 `zpp init --template lib | exe | plugin` でひな形の形を選べます。
 

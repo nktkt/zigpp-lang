@@ -14,6 +14,7 @@
 - [Language spec](./language.md)
 - [Lowering](./lowering.md)
 - [Diagnostics](./diagnostics.md)
+- [CLI reference](./cli.md)
 - [Examples](./examples.md)
 - [API reference](./api/index.md)
   - [hello_trait](./api/hello_trait.md)

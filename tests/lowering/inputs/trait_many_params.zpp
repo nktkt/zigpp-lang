@@ -1,0 +1,17 @@
+trait Encoder {
+    fn encode(self, a: u32, b: u32, c: u32, d: u32, e: u32, f: u32) u64;
+}
+
+struct Fast {}
+
+impl Encoder for Fast {
+    fn encode(self, a: u32, b: u32, c: u32, d: u32, e: u32, f: u32) u64 {
+        _ = self;
+        return @as(u64, a)
+            | (@as(u64, b) << 8)
+            | (@as(u64, c) << 16)
+            | (@as(u64, d) << 24)
+            | (@as(u64, e) << 32)
+            | (@as(u64, f) << 40);
+    }
+}

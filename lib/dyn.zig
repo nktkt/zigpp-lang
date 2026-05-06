@@ -70,7 +70,7 @@ fn FieldType(comptime S: type, comptime name: []const u8) type {
     inline for (@typeInfo(S).@"struct".fields) |f| {
         if (std.mem.eql(u8, f.name, name)) return f.type;
     }
-    @compileError("no such field: " ++ name);
+    @compileError("struct " ++ @typeName(S) ++ " has no field '" ++ name ++ "'");
 }
 
 const Counter = struct {
