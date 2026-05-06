@@ -8,10 +8,8 @@
 /// `.nopanic` declaration that contradicts the inferred set is rejected
 /// at sema time with Z0030.
 ///
-/// (Note: this example originally targeted `.noasync` enforcement, but
-/// that effect kind is not on this branch — only `.nopanic`, `.noalloc`,
-/// `.noio` and `custom`/`nocustom` are available. We use `.nopanic` to
-/// demonstrate the same shape.)
+/// See `examples/effects_noasync.zpp` for the same shape applied to
+/// `.noasync` (suspension-point enforcement).
 ///
 /// Lowered Zig sketch:
 ///     // Effect annotations are erased post-sema; the body lowers to

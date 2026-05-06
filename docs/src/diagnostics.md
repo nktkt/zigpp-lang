@@ -22,6 +22,7 @@ auto-applicable quick-fix (called out below).
 | Code  | Name                                                 | Axis                  |
 | ----- | ---------------------------------------------------- | --------------------- |
 | Z0001 | unknown trait                                        | Traits & `impl`       |
+| Z0002 | structural trait method missing on type              | Traits & `impl`       |
 | Z0010 | owned struct missing deinit                          | Ownership             |
 | Z0011 | `using` target lacks deinit                         | Ownership             |
 | Z0020 | use after move                                       | Move / borrow         |
@@ -65,6 +66,43 @@ fn dispatch(g: dyn Greeter) void { g.vtable.greet(g.ptr); }
 ```
 
 Test: `tests/diagnostics/diags.zig`.
+
+### Z0002 — structural trait method missing on type
+
+Traits declared with `: structural` are satisfied by *matching method
+shapes* on the target type — no explicit `impl` block is required.
+When you do write `impl T for X { ... }` for a structural `T`, every
+method named in the impl block must correspond to an existing method
+on `X` (the impl block re-exports those methods through the trait's
+vtable). Missing-from-the-trait methods are allowed (that's the whole
+point of structural), but missing-from-the-type methods are not.
+
+This is the dual of Z0040 — Z0040 fires when a *nominal* impl is
+missing methods the trait requires; Z0002 fires when a *structural*
+impl is missing methods on the type the impl wants to re-export.
+
+```zig
+trait Greeter : structural { fn greet(self) void; }
+const Friendly = struct { name: []const u8 };
+impl Greeter for Friendly {
+    fn greet(self) void { _ = self; }   // Friendly has no greet → Z0002
+}
+```
+
+Fix — add the listed method(s) to the struct definition, or drop the
+impl block entirely (structural traits don't need one):
+
+```zig
+const Friendly = struct {
+    name: []const u8,
+    pub fn greet(self: *@This()) void { _ = self; }
+};
+// No impl block required — structural traits pick this up.
+```
+
+See: `examples/structural_trait.zpp` (compliant example),
+`tests/diagnostics/diags.zig` (3 fixtures covering the trigger,
+the matching-method case, and the no-impl case).
 
 ### Z0040 — impl is missing trait method(s)
 
