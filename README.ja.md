@@ -216,6 +216,10 @@ cd vscode && npm install && npm run compile
 go-to-implementation、call hierarchy、code lens、code action、
 `Zig++: Run File` / `Zig++: Show Lowered Zig` コマンドを提供します。
 
+Vim/Neovim、Emacs、Helix などその他の LSP クライアントは、`zpp-lsp`
+バイナリに stdio で直接接続できます。上記の IDE 側機能はすべて言語
+サーバ側から提供されているため、VS Code 以外でも同じ機能が使えます。
+
 ## 哲学
 
 - **隠れたメモリ確保なし。** すべてのアロケータは引数。

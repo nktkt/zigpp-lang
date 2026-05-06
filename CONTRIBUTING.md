@@ -29,7 +29,7 @@ Required: **Zig 0.15.x** (see CI for the exact pinned version).
 | `compiler/`     | `.zpp` → `.zig` frontend (token, ast, parser, sema, lower, diagnostics) |
 | `lib/`          | `zpp` runtime: `Dyn`, `Owned`, contracts, derive, async  |
 | `tools/`        | `zpp` CLI plus `fmt`, `lsp`, `doc`, `migrate`            |
-| `examples/`     | 8 `.zpp` programs covering each construct                |
+| `examples/`     | 15+ `.zpp` programs plus multi-file / build.zpp / CLI projects |
 | `tests/`        | compile, diagnostic, snapshot, behavior, no-hidden-alloc, fuzz |
 | `vscode/`       | VS Code extension (TextMate grammar + LSP client)        |
 
@@ -141,9 +141,10 @@ git worktree add ../zigpp-feature-a -b feat/feature-a origin/main
 git worktree add ../zigpp-feature-b -b feat/feature-b origin/main
 ```
 
-Each tab opens its worktree directory, edits, runs `zig build all`,
-pushes its branch, and opens a PR. Branch protection prevents direct
-pushes to `main`; release-please cuts the version when the PR merges.
+Each tab opens its worktree directory, edits, runs `zig build &&
+zig build test`, pushes its branch, and opens a PR. Branch protection
+prevents direct pushes to `main`; release-please cuts the version
+when the PR merges.
 
 To avoid conflicts, **claim a work area** via the issue tracker:
 
