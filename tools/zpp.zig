@@ -961,7 +961,7 @@ fn renderCodeJsonAlloc(
 fn renderListJsonAlloc(allocator: std.mem.Allocator) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
-    try writeListJson(&aw.writer);
+    try writeListJson(allocator, &aw.writer);
     return aw.toOwnedSlice();
 }
 
@@ -1022,20 +1022,22 @@ fn writeCodeJson(
     try s.endObject();
 }
 
-fn writeListJson(writer: *std.Io.Writer) !void {
+fn writeListJson(allocator: std.mem.Allocator, writer: *std.Io.Writer) !void {
     var s: std.json.Stringify = .{ .writer = writer, .options = .{} };
     try s.beginObject();
     try s.objectField("codes");
     try s.beginArray();
     for (compiler.diagnostics.all_codes) |code| {
         const title = compiler.diagnostics.summary(code);
+        const summary_buf = try flattenHint(allocator, code);
+        defer allocator.free(summary_buf);
         try s.beginObject();
         try s.objectField("code");
         try s.write(code.id());
         try s.objectField("title");
         try s.write(title);
         try s.objectField("summary");
-        try s.write(title);
+        try s.write(summary_buf);
         try s.endObject();
     }
     try s.endArray();
@@ -1572,13 +1574,21 @@ test "explain --json --list emits parseable JSON with all codes" {
     // Spec only requires "at least 5". Today we have 16; allow growth.
     try std.testing.expect(codes.items.len >= 5);
     // Each entry has the contracted shape.
+    var any_summary_distinct = false;
     for (codes.items) |entry| {
         const obj = entry.object;
         const code_val = obj.get("code").?.string;
         try std.testing.expect(std.mem.startsWith(u8, code_val, "Z"));
         try std.testing.expect(obj.get("title").?.string.len > 0);
         try std.testing.expect(obj.get("summary").?.string.len > 0);
+        if (!std.mem.eql(u8, obj.get("title").?.string, obj.get("summary").?.string)) {
+            any_summary_distinct = true;
+        }
     }
+    // At least one code has a distinct hint (the single-code path's contract);
+    // the list path used to emit summary == title for every entry, masking the
+    // hint entirely.
+    try std.testing.expect(any_summary_distinct);
 }
 
 test "explain --json unknown code emits error JSON doc" {
