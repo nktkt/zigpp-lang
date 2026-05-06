@@ -1,0 +1,12 @@
+const std = @import("std");
+
+fn quiet_hash(bytes: []const u8) u64 effects(.noasync) {
+    var h: u64 = 0xcbf29ce484222325;
+    for (bytes) |b| {
+        h ^= b;
+        h *%= 0x100000001b3;
+    }
+    return h;
+}
+
+fn ask_quiet() []const u8 { return @effectsOf(quiet_hash); }
