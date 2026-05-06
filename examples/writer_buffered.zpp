@@ -31,7 +31,6 @@
 ///     };
 
 const std = @import("std");
-const zpp = @import("zpp");
 
 trait Writer {
     fn write(self, bytes: []const u8) anyerror!void;
