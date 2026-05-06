@@ -188,6 +188,47 @@ test "Z0040: complete impl produces no diagnostic" {
     try std.testing.expect(!hasCode(&result.diags, "Z0040"));
 }
 
+test "Z0040: omitting a default-bodied method does not fire" {
+    // The trait supplies a default body for `farewell`, so the impl is
+    // free to skip it. Only `greet` is required and the impl provides it,
+    // so Z0040 must stay silent.
+    const a = std.testing.allocator;
+    const src =
+        \\trait Greeter {
+        \\    fn greet(self) void;
+        \\    fn farewell(self) void {
+        \\        // default body — fine to omit in impls
+        \\    }
+        \\}
+        \\const Friendly = struct { name: []const u8 };
+        \\impl Greeter for Friendly {
+        \\    fn greet(self) void { _ = self; }
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(!hasCode(&result.diags, "Z0040"));
+}
+
+test "Z0040: missing a non-default method still fires when defaults exist" {
+    // Mixing: `farewell` has a default and may be skipped, but `greet`
+    // is required and the impl drops it — Z0040 must still fire.
+    const a = std.testing.allocator;
+    const src =
+        \\trait Greeter {
+        \\    fn greet(self) void;
+        \\    fn farewell(self) void {}
+        \\}
+        \\const Friendly = struct { name: []const u8 };
+        \\impl Greeter for Friendly {
+        \\    fn farewell(self) void { _ = self; }
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(hasCode(&result.diags, "Z0040"));
+}
+
 // --- Z0030 effect inference (MVP) ---
 
 test "Z0030: noalloc annotation matches inference does not fire" {

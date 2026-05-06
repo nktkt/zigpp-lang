@@ -6,6 +6,7 @@ const cases = [_][]const u8{
     "trait_simple",
     "dyn_call",
     "derive_extras",
+    "trait_default_method",
     "effects_noasync",
 };
 
@@ -148,6 +149,10 @@ test "snapshot: dyn_call" {
 
 test "snapshot: derive_extras" {
     try runOne(std.testing.allocator, "derive_extras");
+}
+
+test "snapshot: trait_default_method" {
+    try runOne(std.testing.allocator, "trait_default_method");
 }
 
 test "snapshot: effects_noasync" {
