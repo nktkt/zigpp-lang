@@ -1,0 +1,38 @@
+// build.zpp — a thin alias over build.zig.
+//
+// `zpp build` will lower this file to `build.zig` (only when build.zig is
+// missing or stale) and then invoke `zig build`. Anything Zig accepts
+// works here; this file uses plain Zig for readability.
+//
+// The `pub fn main` shim at the bottom is only needed so the repo's
+// `examples/` end-to-end harness (which walks every .zpp under examples/
+// and tries to build it as a standalone executable) does not choke on
+// this file. A real project's build.zpp does not need it.
+
+const std = @import("std");
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
+    const exe_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const exe = b.addExecutable(.{
+        .name = "build_zpp_demo",
+        .root_module = exe_mod,
+    });
+    b.installArtifact(exe);
+
+    const run_cmd = b.addRunArtifact(exe);
+    run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_cmd.addArgs(args);
+    const run_step = b.step("run", "Run the demo");
+    run_step.dependOn(&run_cmd.step);
+}
+
+// e2e harness shim — see comment at the top.
+pub fn main() void {}

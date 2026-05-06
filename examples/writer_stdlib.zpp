@@ -1,0 +1,87 @@
+/// writer_stdlib.zpp — consume the stdlib `zpp.writer` Writer trait.
+///
+/// Teaches: how to plug a sink into the runtime-provided `Writer` fat
+/// pointer instead of hand-rolling your own (compare with
+/// `examples/writer_buffered.zpp`, which builds the same shape from
+/// scratch). Three things land here:
+///   1. `zpp.writer.stdout()` — write to the process's stdout via the trait.
+///   2. `zpp.writer.FileWriter` + `zpp.writer.BufferedWriter(N)` — stack a
+///      buffered wrapper over a file sink and observe coalesced flushes.
+///   3. `zpp.writer.print(w, fmt, args)` — formatted output with a fixed
+///      1024-byte stack buffer (no heap allocation).
+///
+/// The whole module is type-erased through `zpp.Dyn`, so a generic helper
+/// like `greet(w: zpp.writer.Writer, name: []const u8)` takes the fat
+/// pointer directly and works against every concrete sink.
+///
+/// Lowered Zig sketch:
+///     const w_stdout = blk: {
+///         var sw = zpp.writer.stdout();
+///         break :blk sw.writer();
+///     };
+///     try zpp.writer.print(w_stdout, "hello, {s}\n", .{"zigpp"});
+///
+///     var fw = zpp.writer.FileWriter.init(file);
+///     var bw = zpp.writer.BufferedWriter(64).init(fw.writer());
+///     const w = bw.writer();
+///     try zpp.writer.writeAll(w, "buffered ");
+///     try zpp.writer.print(w, "value={d}\n", .{42});
+///     try zpp.writer.flush(w);
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+// Generic over `zpp.writer.Writer` — one function, every sink. The
+// trait is a fat pointer, so this does not monomorphize per concrete
+// writer type the way `impl Writer` would.
+fn greet(w: zpp.writer.Writer, name: []const u8) !void {
+    try zpp.writer.print(w, "hello, {s}!\n", .{name});
+}
+
+pub fn main() !void {
+    // 1) Stdout via the stdlib trait. `stdout()` returns a `StdoutWriter`
+    //    by value; `.writer()` materialises a comptime vtable and packs
+    //    it with `&sw` into a `Writer` fat pointer.
+    var sw = zpp.writer.stdout();
+    try greet(sw.writer(), "stdout");
+
+    // 2) File sink with a 64-byte buffered wrapper.
+    const tmp_path = "writer_stdlib.tmp";
+    const file = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true, .read = true });
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+    defer file.close();
+
+    var fw = zpp.writer.FileWriter.init(file);
+    var bw = zpp.writer.BufferedWriter(64).init(fw.writer());
+    const w = bw.writer();
+
+    // Five small writeAlls coalesce into the 64-byte buffer; nothing
+    // touches the file yet.
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        try zpp.writer.writeAll(w, "hi-");
+    }
+    // print() routes formatted output through the same trait. The
+    // formatter's 1024-byte stack buffer drains into the buffered
+    // writer, which in turn drains into the file when full.
+    try zpp.writer.print(w, "value={d}\n", .{42});
+    try zpp.writer.print(w, "{s}", .{"0123456789-0123456789-0123456789-0123456789-end\n"});
+
+    // Explicit flush drains anything still parked in the 64-byte
+    // staging area down through the file writer.
+    try zpp.writer.flush(w);
+
+    // Read the file back and report a checksum to confirm the bytes
+    // landed on disk through the full Writer → BufferedWriter →
+    // FileWriter chain.
+    try file.seekTo(0);
+    var read_buf: [256]u8 = undefined;
+    const n = try file.readAll(&read_buf);
+    const contents = read_buf[0..n];
+
+    std.debug.print("wrote {d} bytes via zpp.writer to '{s}'\n", .{ n, tmp_path });
+    std.debug.print("first 16: \"{s}\"\n", .{contents[0..@min(contents.len, 16)]});
+    const tail_start = if (contents.len >= 16) contents.len - 16 else 0;
+    std.debug.print("last 16:  \"{s}\"\n", .{contents[tail_start..]});
+    std.debug.print("(stdlib Writer trait; BufferedWriter coalesced; explicit flush drained the tail)\n", .{});
+}

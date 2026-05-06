@@ -231,6 +231,20 @@ pub const Parser = struct {
     fn parseTrait(self: *Parser, is_pub: bool, start: u32) !ast.TraitDecl {
         _ = try self.expect(.kw_trait, "trait decl");
         const name_tok = try self.expect(.ident, "trait name");
+
+        // Optional `: structural` modifier after the trait name.
+        // We accept any identifier after the colon for forward-compat
+        // (only `structural` flips the flag today; future kinds may
+        // appear here without breaking older code).
+        var is_structural = false;
+        if (self.match(.colon)) {
+            const kind_tok = try self.expect(.ident, "trait kind");
+            const kind_text = kind_tok.slice(self.source);
+            if (std.mem.eql(u8, kind_text, "structural")) {
+                is_structural = true;
+            }
+        }
+
         _ = try self.expect(.l_brace, "trait body");
 
         var methods: std.ArrayList(ast.TraitMethod) = .{};
@@ -245,6 +259,7 @@ pub const Parser = struct {
             .name = name_tok.slice(self.source),
             .methods = owned,
             .is_pub = is_pub,
+            .is_structural = is_structural,
             .span = .{ .start = start, .end = close.span.end },
         };
     }
@@ -256,11 +271,40 @@ pub const Parser = struct {
         _ = try self.expect(.l_paren, "param list");
         const params = try self.parseParamList();
         const ret_text = try self.parseReturnType();
+
+        // Either `;` (signature only) or `{ ... }` (default body).
+        if (self.check(.l_brace)) {
+            const open = self.advance(); // consume `{`
+            const body_start = open.span.end;
+            var body_end = body_start;
+            var depth: i32 = 1;
+            while (!self.isAtEnd()) {
+                const t = self.peek();
+                switch (t.kind) {
+                    .l_paren, .l_brace, .l_bracket, .dot_brace => depth += 1,
+                    .r_paren, .r_brace, .r_bracket => depth -= 1,
+                    else => {},
+                }
+                if (depth == 0) break;
+                body_end = t.span.end;
+                _ = self.advance();
+            }
+            const close = try self.expect(.r_brace, "trait method body close");
+            return .{
+                .name = name.slice(self.source),
+                .params = params,
+                .return_type = ret_text,
+                .body = self.source[body_start..body_end],
+                .span = .{ .start = start, .end = close.span.end },
+            };
+        }
+
         const semi = try self.expect(.semicolon, "trait method end");
         return .{
             .name = name.slice(self.source),
             .params = params,
             .return_type = ret_text,
+            .body = null,
             .span = .{ .start = start, .end = semi.span.end },
         };
     }
@@ -640,6 +684,10 @@ pub const Parser = struct {
                 .panic
             else if (std.mem.eql(u8, text, "nopanic"))
                 .nopanic
+            else if (std.mem.eql(u8, text, "async"))
+                .@"async"
+            else if (std.mem.eql(u8, text, "noasync"))
+                .noasync
             else if (std.mem.eql(u8, text, "custom"))
                 .custom
             else if (std.mem.eql(u8, text, "nocustom"))

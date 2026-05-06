@@ -172,6 +172,71 @@ test "Z0040: impl missing trait method" {
     try std.testing.expect(hasCode(&result.diags, "Z0040"));
 }
 
+test "Z0002: structural trait impl missing methods on target type" {
+    // `Greeter` is structural, so the `impl` block is allowed to omit the
+    // `farewell` method (no Z0040). However the `greet` method LISTED in
+    // the impl does not exist on `Friendly` — Z0002 must fire.
+    const a = std.testing.allocator;
+    const src =
+        \\trait Greeter : structural {
+        \\    fn greet(self) void;
+        \\    fn farewell(self) void;
+        \\}
+        \\const Friendly = struct { name: []const u8 };
+        \\impl Greeter for Friendly {
+        \\    fn greet(self) void { _ = self; }
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(hasCode(&result.diags, "Z0002"));
+    // Structural relaxation: Z0040 (missing trait method) must NOT fire.
+    try std.testing.expect(!hasCode(&result.diags, "Z0040"));
+}
+
+test "Z0002: structural impl with matching method on type does not fire" {
+    // Same shape but the struct now declares `greet` directly. The impl
+    // block re-exports a method that exists, and the trait is structural,
+    // so neither Z0002 nor Z0040 should fire.
+    const a = std.testing.allocator;
+    const src =
+        \\trait Greeter : structural {
+        \\    fn greet(self) void;
+        \\    fn farewell(self) void;
+        \\}
+        \\const Friendly = struct {
+        \\    name: []const u8,
+        \\    pub fn greet(self: *@This()) void { _ = self; }
+        \\};
+        \\impl Greeter for Friendly {
+        \\    fn greet(self) void { _ = self; }
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(!hasCode(&result.diags, "Z0002"));
+    try std.testing.expect(!hasCode(&result.diags, "Z0040"));
+}
+
+test "Z0002: structural trait without an impl block is fine" {
+    // Structural traits can be satisfied with no `impl` at all. The
+    // analyzer must not emit anything in that case.
+    const a = std.testing.allocator;
+    const src =
+        \\trait Greeter : structural {
+        \\    fn greet(self) void;
+        \\}
+        \\const Friendly = struct {
+        \\    name: []const u8,
+        \\    pub fn greet(self: *@This()) void { _ = self; }
+        \\};
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(!hasCode(&result.diags, "Z0002"));
+    try std.testing.expect(!hasCode(&result.diags, "Z0040"));
+}
+
 test "Z0040: complete impl produces no diagnostic" {
     const a = std.testing.allocator;
     const src =
@@ -186,6 +251,47 @@ test "Z0040: complete impl produces no diagnostic" {
     var result = try analyze(a, src);
     defer result.diags.deinit();
     try std.testing.expect(!hasCode(&result.diags, "Z0040"));
+}
+
+test "Z0040: omitting a default-bodied method does not fire" {
+    // The trait supplies a default body for `farewell`, so the impl is
+    // free to skip it. Only `greet` is required and the impl provides it,
+    // so Z0040 must stay silent.
+    const a = std.testing.allocator;
+    const src =
+        \\trait Greeter {
+        \\    fn greet(self) void;
+        \\    fn farewell(self) void {
+        \\        // default body — fine to omit in impls
+        \\    }
+        \\}
+        \\const Friendly = struct { name: []const u8 };
+        \\impl Greeter for Friendly {
+        \\    fn greet(self) void { _ = self; }
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(!hasCode(&result.diags, "Z0040"));
+}
+
+test "Z0040: missing a non-default method still fires when defaults exist" {
+    // Mixing: `farewell` has a default and may be skipped, but `greet`
+    // is required and the impl drops it — Z0040 must still fire.
+    const a = std.testing.allocator;
+    const src =
+        \\trait Greeter {
+        \\    fn greet(self) void;
+        \\    fn farewell(self) void {}
+        \\}
+        \\const Friendly = struct { name: []const u8 };
+        \\impl Greeter for Friendly {
+        \\    fn farewell(self) void { _ = self; }
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(hasCode(&result.diags, "Z0040"));
 }
 
 // --- Z0030 effect inference (MVP) ---
@@ -293,6 +399,117 @@ test "Z0030: nopanic fn that panics fires" {
     var result = try analyze(a, src);
     defer result.diags.deinit();
     try std.testing.expect(hasCode(&result.diags, "Z0030"));
+}
+
+test "Z0030: noasync annotation matches inference does not fire" {
+    // `arith` is pure arithmetic and `quiet` only calls it. Neither body
+    // contains any of the async heuristic substrings, so inference agrees
+    // with the `.noasync` annotation and Z0030 must not fire.
+    const a = std.testing.allocator;
+    const src =
+        \\fn arith(x: i32) i32 { return x + 1; }
+        \\effects(.noasync) fn quiet(x: i32) i32 {
+        \\    return arith(x) * 2;
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(!hasCode(&result.diags, "Z0030"));
+}
+
+test "Z0030: noasync fn that spawns a thread fires" {
+    // `racy` declares .noasync but the body literally contains
+    // `std.Thread.spawn`, which is in the async heuristic. Z0030 must fire.
+    const a = std.testing.allocator;
+    const src =
+        \\const std = @import("std");
+        \\effects(.noasync) fn racy() !void {
+        \\    const t = try std.Thread.spawn(.{}, work, .{});
+        \\    t.join();
+        \\}
+        \\fn work() void {}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(hasCode(&result.diags, "Z0030"));
+}
+
+test "Z0030: noasync fn that transitively spawns fires" {
+    // `outer` declares .noasync but calls `inner`, whose body uses
+    // `TaskGroup` from the async heuristic. Z0030 must fire on `outer`.
+    // It must NOT fire on `inner` itself because `inner` does not
+    // declare .noasync.
+    const a = std.testing.allocator;
+    const src =
+        \\const std = @import("std");
+        \\const zpp = @import("zpp");
+        \\fn inner(allocator: std.mem.Allocator) !void {
+        \\    var group = zpp.async_mod.TaskGroup.init(allocator);
+        \\    defer group.deinit();
+        \\    try group.join();
+        \\}
+        \\effects(.noasync) fn outer(allocator: std.mem.Allocator) !void {
+        \\    try inner(allocator);
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(hasCode(&result.diags, "Z0030"));
+    var z0030_count: usize = 0;
+    for (result.diags.items.items) |d| {
+        if (std.mem.eql(u8, d.code.id(), "Z0030")) z0030_count += 1;
+    }
+    // Only the `.noasync` violation on `outer` — `inner` does not
+    // declare any denial so its inferred `.async` is fine.
+    try std.testing.expectEqual(@as(usize, 1), z0030_count);
+}
+
+test "@effectsOf(spawner) surfaces async after panic" {
+    // A fn that uses `TaskGroup` (the async heuristic) lowers to
+    // `"async"`. The join order is alloc/io/panic/async — async sits
+    // after the three classic axes and before any `custom("X")` trailers.
+    const a = std.testing.allocator;
+    var diags = compiler.Diagnostics.init(a);
+    defer diags.deinit();
+    const src =
+        \\const std = @import("std");
+        \\const zpp = @import("zpp");
+        \\fn spawner(allocator: std.mem.Allocator) !void {
+        \\    var g = zpp.async_mod.TaskGroup.init(allocator);
+        \\    defer g.deinit();
+        \\    try g.join();
+        \\}
+        \\fn ask() []const u8 { return @effectsOf(spawner); }
+    ;
+    const out = try compiler.compileToZig(a, src, &diags);
+    defer a.free(out);
+    try std.testing.expect(!hasCode(&diags, "Z0050"));
+    try std.testing.expect(std.mem.indexOf(u8, out, "return \"async\";") != null);
+}
+
+test "@effectsOf joins async after alloc/io/panic" {
+    // A fn that allocates, prints (io), and spawns a thread (async)
+    // produces `"alloc,io,async"` — async appears after panic in the
+    // fixed join order and before any `custom("X")` trailers.
+    const a = std.testing.allocator;
+    var diags = compiler.Diagnostics.init(a);
+    defer diags.deinit();
+    const src =
+        \\const std = @import("std");
+        \\fn busy(al: std.mem.Allocator) !void {
+        \\    const xs = try al.alloc(u8, 1);
+        \\    _ = xs;
+        \\    std.debug.print("hi\n", .{});
+        \\    const t = try std.Thread.spawn(.{}, work, .{});
+        \\    t.join();
+        \\}
+        \\fn work() void {}
+        \\fn ask() []const u8 { return @effectsOf(busy); }
+    ;
+    const out = try compiler.compileToZig(a, src, &diags);
+    defer a.free(out);
+    try std.testing.expect(!hasCode(&diags, "Z0050"));
+    try std.testing.expect(std.mem.indexOf(u8, out, "return \"alloc,io,async\";") != null);
 }
 
 test "@effectsOf(pure) lowers to empty string" {
@@ -418,4 +635,98 @@ test "@effectsOf appends custom(\"net\") after alloc when both are inferred" {
     defer a.free(out);
     try std.testing.expect(!hasCode(&diags, "Z0050"));
     try std.testing.expect(std.mem.indexOf(u8, out, "return \"alloc,custom(\\\"net\\\")\";") != null);
+}
+
+// --- Lexer / parser / using-deinit codes (Z0011, Z0102, Z0200, Z0201) ---
+//
+// These four codes were defined in `compiler/diagnostics.zig` (with hint
+// + explanation text) but had no diagnostic-test coverage. Each test
+// below asserts the code fires for a minimal known-bad input. The
+// remaining reserved codes Z0100 / Z0101 / Z0103 / Z0300 are enum
+// variants with no emit site in the current compiler source — they are
+// intentionally not exercised here.
+
+test "Z0011: using over an owned struct lacking deinit" {
+    // The type is registered as `owned struct` but has no `deinit`
+    // method, so the `using` binding has nothing to auto-release. Z0010
+    // fires for the missing-deinit struct itself; Z0011 fires at the
+    // `using` site.
+    const a = std.testing.allocator;
+    const src =
+        \\owned struct Plain { x: u32 }
+        \\fn run() void {
+        \\    using p = Plain{ .x = 1 };
+        \\    _ = p;
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(hasCode(&result.diags, "Z0011"));
+}
+
+test "Z0102: `own` without `var` or `const`" {
+    // `own` requires either `var` or `const` after it. Without one the
+    // parser emits Z0102 ("expected 'var' or 'const' after 'own'") and
+    // synchronizes to the next top-level decl.
+    const a = std.testing.allocator;
+    const src =
+        \\fn run() void {
+        \\    own x = 1;
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(hasCode(&result.diags, "Z0102"));
+}
+
+test "Z0102: well-formed `own var` does not fire" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn run() void {
+        \\    own var x = 1;
+        \\    _ = x;
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(!hasCode(&result.diags, "Z0102"));
+}
+
+test "Z0200: stray `$` is rejected as invalid character" {
+    // `$` is not punctuation, not whitespace, not an identifier start,
+    // and not a digit, so the lexer falls through to the invalid-char
+    // diagnostic.
+    const a = std.testing.allocator;
+    const src =
+        \\fn run() void {
+        \\    var x = $;
+        \\    _ = x;
+        \\}
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(hasCode(&result.diags, "Z0200"));
+}
+
+test "Z0201: unterminated single-line string literal" {
+    // A `"` with no matching closer before end-of-line emits Z0201 and
+    // yields an invalid token; the parser continues past it.
+    const a = std.testing.allocator;
+    const src =
+        \\const s = "abc;
+        \\
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(hasCode(&result.diags, "Z0201"));
+}
+
+test "Z0201: closed single-line string does not fire" {
+    const a = std.testing.allocator;
+    const src =
+        \\const s = "abc";
+    ;
+    var result = try analyze(a, src);
+    defer result.diags.deinit();
+    try std.testing.expect(!hasCode(&result.diags, "Z0201"));
 }

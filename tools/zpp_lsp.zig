@@ -201,8 +201,12 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
     const params = obj.get("params");
 
     if (std.mem.eql(u8, method, "initialize")) {
+        // `codeLensProvider.resolveProvider:false` means we hand back fully
+        // resolved lenses up front — clients don't need to round-trip a
+        // `codeLens/resolve` for the title. Our lenses are derived from the
+        // already-cached parse, so eager resolution is cheap.
         const caps =
-            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"referencesProvider":true,"workspaceSymbolProvider":true,"renameProvider":{"prepareProvider":true},"completionProvider":{"triggerCharacters":[".",":"]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false},"codeActionProvider":{"codeActionKinds":["quickfix"]},"callHierarchyProvider":true,"semanticTokensProvider":{"legend":{"tokenTypes":["keyword","string","number","comment","function","interface","struct","variable"],"tokenModifiers":["declaration"]},"full":{"delta":true},"range":true}},"serverInfo":{"name":"zpp-lsp","version":"0.13.0"}}
+            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"typeDefinitionProvider":true,"implementationProvider":true,"referencesProvider":true,"workspaceSymbolProvider":true,"renameProvider":{"prepareProvider":true},"completionProvider":{"triggerCharacters":[".",":"]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false},"codeActionProvider":{"codeActionKinds":["quickfix"]},"codeLensProvider":{"resolveProvider":false},"callHierarchyProvider":true,"semanticTokensProvider":{"legend":{"tokenTypes":["keyword","string","number","comment","function","interface","struct","variable"],"tokenModifiers":["declaration"]},"full":{"delta":true},"range":true},"inlayHintProvider":true,"foldingRangeProvider":true},"serverInfo":{"name":"zpp-lsp","version":"0.13.0"}}
         ;
         try writeResult(server.allocator, id_text, caps);
         return;
@@ -280,6 +284,10 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
         try onCodeAction(server, id_text, params);
         return;
     }
+    if (std.mem.eql(u8, method, "textDocument/codeLens")) {
+        try onCodeLens(server, id_text, params);
+        return;
+    }
     if (std.mem.eql(u8, method, "textDocument/semanticTokens/full")) {
         try onSemanticTokensFull(server, id_text, params);
         return;
@@ -306,6 +314,14 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
     }
     if (std.mem.eql(u8, method, "callHierarchy/outgoingCalls")) {
         try onOutgoingCalls(server, id_text, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/inlayHint")) {
+        try onInlayHint(server, id_text, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/foldingRange")) {
+        try onFoldingRange(server, id_text, params);
         return;
     }
     if (obj.get("id") != null) {
@@ -2288,6 +2304,266 @@ fn renderCodeActions(allocator: std.mem.Allocator, actions: []const CodeActionDi
     return out.toOwnedSlice(allocator);
 }
 
+/// `textDocument/codeLens` handler. Walks the cached doc text and emits one
+/// lens per matching top-level construct:
+///   - effects-annotated fns        -> declared vs inferred effect set
+///   - structs/owned-structs with `derive(.{ ... })` -> derived-method count
+///   - `owned struct ...`           -> deinit-shape verification status
+///
+/// Lenses are fully resolved at query time (no `codeLens/resolve` round-trip
+/// — see `resolveProvider:false` in `initialize`). The click target is a
+/// no-op `zpp.lens.info` command; the title carries the only signal a user
+/// needs to read.
+fn onCodeLens(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    const allocator = server.allocator;
+    const p = params orelse return writeResult(allocator, id_text, "[]");
+    if (p != .object) return writeResult(allocator, id_text, "[]");
+    const td = p.object.get("textDocument") orelse return writeResult(allocator, id_text, "[]");
+    if (td != .object) return writeResult(allocator, id_text, "[]");
+    const uri_v = td.object.get("uri") orelse return writeResult(allocator, id_text, "[]");
+    if (uri_v != .string) return writeResult(allocator, id_text, "[]");
+
+    const text = server.docs.get(uri_v.string) orelse {
+        try writeResult(allocator, id_text, "[]");
+        return;
+    };
+
+    const result = buildCodeLenses(allocator, text) catch {
+        try writeResult(allocator, id_text, "[]");
+        return;
+    };
+    defer allocator.free(result);
+    try writeResult(allocator, id_text, result);
+}
+
+/// Build the `result` JSON array (as an owned slice) for a codeLens response
+/// over `source`. Returns "[]" on parse/sema failure rather than erroring —
+/// partial syntax mid-edit is the common case in an LSP.
+///
+/// We run a fresh parse + sema so the inferred-effects table is available
+/// for the effect lens (compared against the declared annotation). Both the
+/// AST arena and the SemaResult are kept alive for the entire build because
+/// the maps store slices that point into the AST source / arena.
+fn buildCodeLenses(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    var diags = compiler.Diagnostics.init(allocator);
+    defer diags.deinit();
+    var arena = compiler.ast.Arena.init(allocator);
+    defer arena.deinit();
+
+    const file = compiler.parseSource(allocator, source, &arena, &diags) catch {
+        return try allocator.dupe(u8, "[]");
+    };
+
+    // Sema is best-effort: if it fails (e.g. malformed user code) we still
+    // emit derive/owned lenses; the effect lens just falls back to the
+    // declared set without an inference comparison.
+    var sema_engine = compiler.sema.Sema.init(allocator, &diags);
+    var sema_result_opt: ?compiler.sema.SemaResult = sema_engine.analyze(&file) catch null;
+    defer if (sema_result_opt) |*r| r.deinit();
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    try out.append(allocator, '[');
+    var first = true;
+
+    for (file.decls) |decl| {
+        switch (decl) {
+            .fn_decl => |fd| {
+                if (fd.sig.effects) |ef| {
+                    const inferred_opt: ?compiler.sema.InferredEffects =
+                        if (sema_result_opt) |r| r.inferred_effects.get(fd.sig.name) else null;
+                    try appendEffectLens(allocator, &out, &first, source, fd.sig.span, ef, inferred_opt);
+                }
+            },
+            .struct_decl => |sd| {
+                if (sd.derive) |dv| {
+                    try appendDeriveLens(allocator, &out, &first, source, sd.span, dv);
+                }
+            },
+            .owned_struct => |os| {
+                if (os.derive) |dv| {
+                    try appendDeriveLens(allocator, &out, &first, source, os.span, dv);
+                }
+                try appendOwnedDeinitLens(allocator, &out, &first, source, os);
+            },
+            else => {},
+        }
+    }
+
+    try out.append(allocator, ']');
+    return out.toOwnedSlice(allocator);
+}
+
+/// Lens range covers the keyword line of the decl (start.line == decl line,
+/// chars 0..1). VS Code only uses `range.start.line` to pick the gutter row,
+/// so a one-character end suffices and keeps the JSON minimal.
+fn lensLineRange(source: []const u8, span: compiler.diagnostics.Span) LspRange {
+    const start = compiler.locate(source, span.start);
+    return .{
+        .start_line = start.line - 1,
+        .start_col = 0,
+        .end_line = start.line - 1,
+        .end_col = 1,
+    };
+}
+
+/// Append a single CodeLens object to `out`. Title is the human-readable
+/// label; command is left as a no-op `zpp.lens.info` so editors render the
+/// title as a non-interactive label (clicking it does nothing).
+fn appendCodeLens(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    first: *bool,
+    range: LspRange,
+    title: []const u8,
+) !void {
+    if (!first.*) try out.append(allocator, ',');
+    first.* = false;
+    try out.append(allocator, '{');
+    try out.appendSlice(allocator, "\"range\":");
+    try appendRangeJson(out, allocator, range);
+    const title_json = try jsonStringify(allocator, title);
+    defer allocator.free(title_json);
+    try out.appendSlice(allocator, ",\"command\":{\"title\":");
+    try out.appendSlice(allocator, title_json);
+    try out.appendSlice(allocator, ",\"command\":\"zpp.lens.info\",\"arguments\":[]}");
+    try out.append(allocator, '}');
+}
+
+/// Format the declared-effect list as a comma-separated string with leading
+/// dots (e.g. `.noalloc, .io`). Custom names render as `.custom("X")`.
+fn formatDeclaredEffects(allocator: std.mem.Allocator, ef: compiler.ast.EffectsAttr) ![]u8 {
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(allocator);
+    var first = true;
+    for (ef.effects) |e| {
+        if (!first) try buf.appendSlice(allocator, ", ");
+        first = false;
+        try buf.append(allocator, '.');
+        try buf.appendSlice(allocator, e.text);
+        if (e.name.len != 0) {
+            try buf.append(allocator, '(');
+            try buf.append(allocator, '"');
+            try buf.appendSlice(allocator, e.name);
+            try buf.append(allocator, '"');
+            try buf.append(allocator, ')');
+        }
+    }
+    return buf.toOwnedSlice(allocator);
+}
+
+/// Format the inferred-effects bitset as `{alloc, io}` style. Pure fns
+/// render as `{}`. Custom names are not surfaced here — the lens compares
+/// against the declared `.no*` axes only, which matches what Z0030 fires on.
+fn formatInferredEffects(allocator: std.mem.Allocator, inf: compiler.sema.InferredEffects) ![]u8 {
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(allocator);
+    try buf.append(allocator, '{');
+    var first = true;
+    if (inf.alloc) {
+        try buf.appendSlice(allocator, "alloc");
+        first = false;
+    }
+    if (inf.io) {
+        if (!first) try buf.appendSlice(allocator, ", ");
+        try buf.appendSlice(allocator, "io");
+        first = false;
+    }
+    if (inf.panic) {
+        if (!first) try buf.appendSlice(allocator, ", ");
+        try buf.appendSlice(allocator, "panic");
+        first = false;
+    }
+    try buf.append(allocator, '}');
+    return buf.toOwnedSlice(allocator);
+}
+
+/// True iff the inferred set violates any declared `.no*` axis. Mirrors the
+/// Z0030 trigger condition in `sema.checkEffectInference` and friends.
+fn declaredViolatesInferred(ef: compiler.ast.EffectsAttr, inf: compiler.sema.InferredEffects) bool {
+    for (ef.effects) |e| {
+        switch (e.kind) {
+            .noalloc => if (inf.alloc) return true,
+            .noio => if (inf.io) return true,
+            .nopanic => if (inf.panic) return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+fn appendEffectLens(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    first: *bool,
+    source: []const u8,
+    sig_span: compiler.diagnostics.Span,
+    ef: compiler.ast.EffectsAttr,
+    inferred_opt: ?compiler.sema.InferredEffects,
+) !void {
+    const declared = try formatDeclaredEffects(allocator, ef);
+    defer allocator.free(declared);
+
+    const title = if (inferred_opt) |inf| blk: {
+        const inferred = try formatInferredEffects(allocator, inf);
+        defer allocator.free(inferred);
+        const status = if (declaredViolatesInferred(ef, inf)) " Z0030" else " OK";
+        break :blk try std.fmt.allocPrint(
+            allocator,
+            "effects: declared {s} / inferred {s}{s}",
+            .{ declared, inferred, status },
+        );
+    } else try std.fmt.allocPrint(allocator, "effects: declared {s}", .{declared});
+    defer allocator.free(title);
+
+    try appendCodeLens(out, allocator, first, lensLineRange(source, sig_span), title);
+}
+
+fn appendDeriveLens(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    first: *bool,
+    source: []const u8,
+    decl_span: compiler.diagnostics.Span,
+    dv: compiler.ast.DeriveAttr,
+) !void {
+    var names_buf = std.ArrayList(u8){};
+    defer names_buf.deinit(allocator);
+    for (dv.names, 0..) |n, i| {
+        if (i != 0) try names_buf.appendSlice(allocator, ", ");
+        try names_buf.appendSlice(allocator, n);
+    }
+    const title = try std.fmt.allocPrint(
+        allocator,
+        "derive: +{d} methods ({s})",
+        .{ dv.names.len, names_buf.items },
+    );
+    defer allocator.free(title);
+    try appendCodeLens(out, allocator, first, lensLineRange(source, decl_span), title);
+}
+
+fn appendOwnedDeinitLens(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    first: *bool,
+    source: []const u8,
+    os: compiler.ast.OwnedStructDecl,
+) !void {
+    var has_deinit = false;
+    for (os.fns) |f| {
+        if (std.mem.eql(u8, f.sig.name, "deinit")) {
+            has_deinit = true;
+            break;
+        }
+    }
+    const title = if (has_deinit)
+        try allocator.dupe(u8, "owned: deinit OK")
+    else
+        try allocator.dupe(u8, "owned: deinit MISSING (Z0010)");
+    defer allocator.free(title);
+    try appendCodeLens(out, allocator, first, lensLineRange(source, os.span), title);
+}
+
 /// LSP semantic-tokens type indices. Order MUST match the legend advertised
 /// in the `initialize` response — VS Code keys off the legend order, not the
 /// names. See SemanticTokenType in
@@ -3611,6 +3887,325 @@ fn jsonStringify(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
+// ============================================================================
+// Inlay hints (textDocument/inlayHint)
+// ============================================================================
+
+/// LSP InlayHintKind:
+///   1 = Type
+///   2 = Parameter
+const InlayHintKind = enum(u8) {
+    type = 1,
+    parameter = 2,
+};
+
+const InlayHint = struct {
+    line: u32,
+    character: u32,
+    label: []const u8, // owned by caller
+    kind: InlayHintKind,
+    padding_left: bool,
+};
+
+fn onInlayHint(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    const allocator = server.allocator;
+    const p = params orelse return writeResult(allocator, id_text, "[]");
+    if (p != .object) return writeResult(allocator, id_text, "[]");
+    const td = p.object.get("textDocument") orelse return writeResult(allocator, id_text, "[]");
+    if (td != .object) return writeResult(allocator, id_text, "[]");
+    const uri_v = td.object.get("uri") orelse return writeResult(allocator, id_text, "[]");
+    if (uri_v != .string) return writeResult(allocator, id_text, "[]");
+
+    // Optional `range` filters which hints we return; default is "everything".
+    var range: ?LspRange = null;
+    if (p.object.get("range")) |r| {
+        range = parseLspRange(r);
+    }
+
+    const text = server.docs.get(uri_v.string) orelse {
+        try writeResult(allocator, id_text, "[]");
+        return;
+    };
+    const result = buildInlayHints(allocator, text, range) catch {
+        try writeResult(allocator, id_text, "[]");
+        return;
+    };
+    defer allocator.free(result);
+    try writeResult(allocator, id_text, result);
+}
+
+/// Build the JSON `result` array for a textDocument/inlayHint request.
+/// Walks `source` token-by-token (skipping strings, char literals, and `//`
+/// line comments via the lexer) and emits hints at three Zig++ specific
+/// constructs: `using x = …`, `own var x = …`, and `derive(.{ … })` on a
+/// struct line. Returns "[]" when the lexer fails or no hints fire.
+fn buildInlayHints(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    range: ?LspRange,
+) ![]u8 {
+    var hints = std.ArrayList(InlayHint){};
+    defer {
+        for (hints.items) |h| allocator.free(h.label);
+        hints.deinit(allocator);
+    }
+
+    try collectInlayHints(allocator, source, &hints);
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    try out.append(allocator, '[');
+    var first = true;
+    for (hints.items) |h| {
+        if (range) |r| {
+            if (h.line < r.start_line or h.line > r.end_line) continue;
+        }
+        if (!first) try out.append(allocator, ',');
+        first = false;
+        const label_json = try jsonStringify(allocator, h.label);
+        defer allocator.free(label_json);
+        const buf = try std.fmt.allocPrint(
+            allocator,
+            "{{\"position\":{{\"line\":{d},\"character\":{d}}},\"label\":{s},\"kind\":{d},\"paddingLeft\":{s}}}",
+            .{
+                h.line,
+                h.character,
+                label_json,
+                @intFromEnum(h.kind),
+                if (h.padding_left) "true" else "false",
+            },
+        );
+        defer allocator.free(buf);
+        try out.appendSlice(allocator, buf);
+    }
+    try out.append(allocator, ']');
+    return out.toOwnedSlice(allocator);
+}
+
+/// Walk `source` with the compiler lexer and append one entry to `hints` per
+/// recognised pattern. Each `label` is an owned slice; the caller must free.
+fn collectInlayHints(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    hints: *std.ArrayList(InlayHint),
+) !void {
+    var lex_diags = compiler.Diagnostics.init(allocator);
+    defer lex_diags.deinit();
+    var lx = compiler.token.Lexer.init(source, &lex_diags);
+    var toks = lx.tokenizeAll(allocator) catch return;
+    defer toks.deinit(allocator);
+
+    // Drop comments — they shouldn't affect adjacency lookups (e.g. a comment
+    // between `using` and the binding name).
+    var t_buf = std.ArrayList(compiler.token.Token){};
+    defer t_buf.deinit(allocator);
+    for (toks.items) |t| switch (t.kind) {
+        .line_comment, .doc_comment => {},
+        else => try t_buf.append(allocator, t),
+    };
+    const ts = t_buf.items;
+
+    var i: usize = 0;
+    while (i < ts.len) : (i += 1) {
+        const t = ts[i];
+        switch (t.kind) {
+            // `using <ident>` -> `: deinit-on-scope-exit` hint after the ident.
+            .kw_using => {
+                if (i + 1 >= ts.len) continue;
+                const id = ts[i + 1];
+                if (id.kind != .ident) continue;
+                const lc = compiler.locate(source, id.span.end);
+                const label = try allocator.dupe(u8, ": deinit-on-scope-exit");
+                try hints.append(allocator, .{
+                    .line = lc.line - 1,
+                    .character = if (lc.col == 0) 0 else lc.col - 1,
+                    .label = label,
+                    .kind = .type,
+                    .padding_left = true,
+                });
+            },
+            // `own var <ident>` -> `: owned` hint after the ident. We allow
+            // optional `mut` style modifiers between `own` and `var` to be
+            // forward-compatible; today only `own var` is grammatical.
+            .kw_own => {
+                // Find the next non-comment token; expect `var`.
+                if (i + 1 >= ts.len) continue;
+                const next = ts[i + 1];
+                if (next.kind != .kw_var) continue;
+                if (i + 2 >= ts.len) continue;
+                const id = ts[i + 2];
+                if (id.kind != .ident) continue;
+                const lc = compiler.locate(source, id.span.end);
+                const label = try allocator.dupe(u8, ": owned");
+                try hints.append(allocator, .{
+                    .line = lc.line - 1,
+                    .character = if (lc.col == 0) 0 else lc.col - 1,
+                    .label = label,
+                    .kind = .type,
+                    .padding_left = true,
+                });
+            },
+            // `derive(.{ A, B, … })` — count comma-separated entries inside
+            // `.{ … }` and emit a `// + N derived methods` summary at the
+            // end of the line containing `derive(`.
+            .kw_derive => {
+                // Match `derive` `(` `.{` …
+                if (i + 2 >= ts.len) continue;
+                if (ts[i + 1].kind != .l_paren) continue;
+                if (ts[i + 2].kind != .dot_brace) continue;
+                // Walk forward, balancing braces, counting commas at depth 1.
+                var depth: i32 = 1;
+                var count: u32 = 0;
+                var saw_any = false;
+                var j: usize = i + 3;
+                while (j < ts.len) : (j += 1) {
+                    const k = ts[j].kind;
+                    if (k == .l_brace or k == .dot_brace) {
+                        depth += 1;
+                    } else if (k == .r_brace) {
+                        depth -= 1;
+                        if (depth == 0) break;
+                    } else if (k == .comma and depth == 1) {
+                        count += 1;
+                    } else if (depth == 1) {
+                        // Any token (other than punctuation) tells us the
+                        // list is non-empty, so a trailing-comma-free `.{ A }`
+                        // is reported as "1 derived method" not "0".
+                        switch (k) {
+                            .ident, .kw_struct, .kw_enum, .kw_union => saw_any = true,
+                            else => {},
+                        }
+                    }
+                }
+                const items: u32 = if (saw_any) count + 1 else count;
+                if (items == 0) continue;
+                // Anchor on the line containing `derive(`. The hint sits at
+                // end-of-line (column == line length) so the label renders as
+                // a trailing pseudo-comment.
+                const lc = compiler.locate(source, t.span.start);
+                const line_idx: u32 = @intCast(lc.line - 1);
+                const eol_col = endOfLineColumn(source, line_idx);
+                const label = try std.fmt.allocPrint(
+                    allocator,
+                    "// + {d} derived method{s}",
+                    .{ items, if (items == 1) "" else "s" },
+                );
+                try hints.append(allocator, .{
+                    .line = line_idx,
+                    .character = eol_col,
+                    .label = label,
+                    .kind = .type,
+                    .padding_left = true,
+                });
+            },
+            else => {},
+        }
+    }
+}
+
+/// Return the 0-indexed column at end of line `line` in `source` (i.e. the
+/// number of bytes on that line). Treats positions past EOF as line length 0.
+fn endOfLineColumn(source: []const u8, line: u32) u32 {
+    var cur_line: u32 = 0;
+    var off: usize = 0;
+    while (off < source.len and cur_line < line) : (off += 1) {
+        if (source[off] == '\n') cur_line += 1;
+    }
+    if (cur_line < line) return 0;
+    var end = off;
+    while (end < source.len and source[end] != '\n') end += 1;
+    return @intCast(end - off);
+}
+
+// ============================================================================
+// Folding ranges (textDocument/foldingRange)
+// ============================================================================
+
+const FoldingRange = struct {
+    start_line: u32,
+    end_line: u32,
+};
+
+fn onFoldingRange(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    const allocator = server.allocator;
+    const p = params orelse return writeResult(allocator, id_text, "[]");
+    if (p != .object) return writeResult(allocator, id_text, "[]");
+    const td = p.object.get("textDocument") orelse return writeResult(allocator, id_text, "[]");
+    if (td != .object) return writeResult(allocator, id_text, "[]");
+    const uri_v = td.object.get("uri") orelse return writeResult(allocator, id_text, "[]");
+    if (uri_v != .string) return writeResult(allocator, id_text, "[]");
+
+    const text = server.docs.get(uri_v.string) orelse {
+        try writeResult(allocator, id_text, "[]");
+        return;
+    };
+    const result = buildFoldingRanges(allocator, text) catch {
+        try writeResult(allocator, id_text, "[]");
+        return;
+    };
+    defer allocator.free(result);
+    try writeResult(allocator, id_text, result);
+}
+
+/// Build the JSON `result` array for a textDocument/foldingRange request.
+/// Walks the parsed top-level decls and emits one folding range per
+/// trait / impl / owned-struct / struct / extern-interface / fn body.
+/// Single-line decls (start_line == end_line) are skipped — folding a single
+/// line is a no-op in every editor and just clutters the response.
+/// Returns "[]" on parse failure or empty input.
+fn buildFoldingRanges(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    var ranges = std.ArrayList(FoldingRange){};
+    defer ranges.deinit(allocator);
+
+    var diags = compiler.Diagnostics.init(allocator);
+    defer diags.deinit();
+    var arena = compiler.ast.Arena.init(allocator);
+    defer arena.deinit();
+
+    if (compiler.parseSource(allocator, source, &arena, &diags)) |file| {
+        for (file.decls) |decl| {
+            // For fn_decls the parser-level `span` covers only the signature
+            // (signature ends at the closing `)` / return type). The body
+            // braces live on a separate `FnBody.span` — that's what we want
+            // the editor to fold. Trait / impl / struct / extern decls all
+            // have a `span` that already covers the whole `{ … }` block.
+            const span = switch (decl) {
+                .fn_decl => |fd| if (fd.body) |b| b.span else fd.sig.span,
+                .trait => |t| t.span,
+                .impl_block => |ib| ib.span,
+                .owned_struct => |os| os.span,
+                .struct_decl => |sd| sd.span,
+                .extern_interface => |ei| ei.span,
+                .raw => continue,
+            };
+            const r = rangeFromSpan(source, span);
+            if (r.end_line <= r.start_line) continue;
+            try ranges.append(allocator, .{
+                .start_line = r.start_line,
+                .end_line = r.end_line,
+            });
+        }
+    } else |_| {}
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    try out.append(allocator, '[');
+    var first = true;
+    for (ranges.items) |r| {
+        if (!first) try out.append(allocator, ',');
+        first = false;
+        const buf = try std.fmt.allocPrint(
+            allocator,
+            "{{\"startLine\":{d},\"endLine\":{d},\"kind\":\"region\"}}",
+            .{ r.start_line, r.end_line },
+        );
+        defer allocator.free(buf);
+        try out.appendSlice(allocator, buf);
+    }
+    try out.append(allocator, ']');
+    return out.toOwnedSlice(allocator);
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{ .safety = true }){};
     defer _ = gpa.deinit();
@@ -4550,4 +5145,255 @@ test "bareTypeName strips pointer / slice / optional prefixes" {
     try std.testing.expectEqualStrings("Foo", bareTypeName("?[]Foo").?);
     try std.testing.expect(bareTypeName("") == null);
     try std.testing.expect(bareTypeName("***") == null);
+}
+
+test "buildInlayHints emits `: deinit-on-scope-exit` after a `using` binding" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn f() void {
+        \\    using guard = make_guard();
+        \\}
+    ;
+    const out = try buildInlayHints(a, src, null);
+    defer a.free(out);
+    // Hint label and kind=Type (1).
+    try std.testing.expect(std.mem.indexOf(u8, out, "\": deinit-on-scope-exit\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"kind\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"paddingLeft\":true") != null);
+    // Anchor on line 1 at the column right after `guard` (`    using guard|`).
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"line\":1,\"character\":15") != null);
+}
+
+test "buildInlayHints emits `: owned` after an `own var` binding" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn f() void {
+        \\    own var buf = make_buf();
+        \\}
+    ;
+    const out = try buildInlayHints(a, src, null);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\": owned\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"kind\":1") != null);
+    // Anchor immediately after `buf` (column 15).
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"line\":1,\"character\":15") != null);
+}
+
+test "buildInlayHints emits derived-method count on derive(.{ ... })" {
+    const a = std.testing.allocator;
+    const src =
+        \\struct Foo {
+        \\    derive(.{ Hash, Eq, Clone, Debug });
+        \\}
+    ;
+    const out = try buildInlayHints(a, src, null);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "// + 4 derived methods") != null);
+    // Anchored on the derive() line (line 1).
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"line\":1") != null);
+}
+
+test "buildInlayHints handles a single-element derive list" {
+    const a = std.testing.allocator;
+    const src =
+        \\struct Foo {
+        \\    derive(.{ Hash });
+        \\}
+    ;
+    const out = try buildInlayHints(a, src, null);
+    defer a.free(out);
+    // Singular form when count == 1.
+    try std.testing.expect(std.mem.indexOf(u8, out, "// + 1 derived method\"") != null);
+}
+
+test "buildInlayHints returns [] when no recognised constructs are present" {
+    const a = std.testing.allocator;
+    const src = "fn helper() void { _ = 1; }\n";
+    const out = try buildInlayHints(a, src, null);
+    defer a.free(out);
+    try std.testing.expectEqualStrings("[]", out);
+}
+
+test "buildInlayHints filters by request range" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn f() void {
+        \\    using a = mk();
+        \\    own var b = mk();
+        \\}
+    ;
+    // Only line 1 (the `using` hint) — line 2 must be filtered out.
+    const range: LspRange = .{ .start_line = 1, .start_col = 0, .end_line = 1, .end_col = 0 };
+    const out = try buildInlayHints(a, src, range);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, ": deinit-on-scope-exit") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, ": owned") == null);
+}
+
+test "buildInlayHints skips constructs inside string literals" {
+    const a = std.testing.allocator;
+    // The token `using` appears inside the literal text of the string, but
+    // the lexer emits a single string_literal token — no kw_using is seen.
+    const src =
+        \\fn f() void {
+        \\    _ = "using x = mk();";
+        \\}
+    ;
+    const out = try buildInlayHints(a, src, null);
+    defer a.free(out);
+    try std.testing.expectEqualStrings("[]", out);
+}
+
+test "buildFoldingRanges emits one range per multi-line top-level decl" {
+    const a = std.testing.allocator;
+    const src =
+        \\trait Writer {
+        \\    fn write(self) !usize;
+        \\}
+        \\struct Counter {
+        \\    n: usize,
+        \\}
+        \\fn helper(x: usize) usize {
+        \\    return x + 1;
+        \\}
+    ;
+    const out = try buildFoldingRanges(a, src);
+    defer a.free(out);
+    // Three regions -> three "kind":"region" markers.
+    var count: usize = 0;
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, out, idx, "\"kind\":\"region\"")) |pos| {
+        count += 1;
+        idx = pos + 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
+    // Trait spans lines 0..2.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"startLine\":0,\"endLine\":2") != null);
+    // Struct spans lines 3..5.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"startLine\":3,\"endLine\":5") != null);
+    // Function body spans lines 6..8.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"startLine\":6,\"endLine\":8") != null);
+}
+
+test "buildFoldingRanges skips single-line decls" {
+    const a = std.testing.allocator;
+    const src = "fn f() void {}\n";
+    const out = try buildFoldingRanges(a, src);
+    defer a.free(out);
+    try std.testing.expectEqualStrings("[]", out);
+}
+
+test "buildFoldingRanges covers impl, owned struct, and extern interface" {
+    const a = std.testing.allocator;
+    const src =
+        \\trait Greeter {
+        \\    fn greet(self) void;
+        \\}
+        \\owned struct Buffer {
+        \\    data: []u8,
+        \\}
+        \\impl Greeter for Buffer {
+        \\    pub fn greet(self) void {}
+        \\}
+        \\extern interface Plugin {
+        \\    fn hello(self) void;
+        \\}
+    ;
+    const out = try buildFoldingRanges(a, src);
+    defer a.free(out);
+    // Four multi-line decls -> four regions.
+    var count: usize = 0;
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, out, idx, "\"kind\":\"region\"")) |pos| {
+        count += 1;
+        idx = pos + 1;
+    }
+    try std.testing.expectEqual(@as(usize, 4), count);
+}
+
+test "buildFoldingRanges returns [] on empty source" {
+    const a = std.testing.allocator;
+    const out = try buildFoldingRanges(a, "");
+    defer a.free(out);
+    try std.testing.expectEqualStrings("[]", out);
+}
+
+test "buildCodeLenses emits effect / derive / owned-deinit lenses" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn pure(x: u32) u32 effects(.noalloc) { return x + 1; }
+        \\struct Counter {
+        \\    n: usize,
+        \\    pub fn bump(self: *Counter) void { self.n += 1; }
+        \\} derive(.{ Hash, Eq, Debug });
+        \\owned struct Box {
+        \\    n: usize,
+        \\    pub fn deinit(self: *Box) void { _ = self; }
+        \\}
+    ;
+    const out = try buildCodeLenses(a, src);
+    defer a.free(out);
+
+    // Three lenses, three command objects.
+    var lens_count: usize = 0;
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, out, idx, "\"command\":{")) |pos| {
+        lens_count += 1;
+        idx = pos + 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), lens_count);
+
+    // Effect lens shows the declared `.noalloc` axis and a clean inferred set.
+    try std.testing.expect(std.mem.indexOf(u8, out, "effects: declared .noalloc / inferred {} OK") != null);
+    // Derive lens reports the requested method count and names.
+    try std.testing.expect(std.mem.indexOf(u8, out, "derive: +3 methods (Hash, Eq, Debug)") != null);
+    // Owned-deinit lens flags the deinit shape as present.
+    try std.testing.expect(std.mem.indexOf(u8, out, "owned: deinit OK") != null);
+    // Click target is the no-op `zpp.lens.info` command.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"command\":\"zpp.lens.info\"") != null);
+}
+
+test "buildCodeLenses flags missing deinit on owned struct" {
+    const a = std.testing.allocator;
+    const src =
+        \\owned struct Leaky {
+        \\    n: usize,
+        \\}
+    ;
+    const out = try buildCodeLenses(a, src);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "owned: deinit MISSING (Z0010)") != null);
+}
+
+test "buildCodeLenses returns [] when no matching constructs" {
+    const a = std.testing.allocator;
+    // No effects(...), no derive(...), no owned struct -> no lenses.
+    const src = "fn helper(x: usize) usize { return x + 1; }\n";
+    const out = try buildCodeLenses(a, src);
+    defer a.free(out);
+    try std.testing.expectEqualStrings("[]", out);
+}
+
+test "buildCodeLenses returns [] on empty source" {
+    const a = std.testing.allocator;
+    const out = try buildCodeLenses(a, "");
+    defer a.free(out);
+    try std.testing.expectEqualStrings("[]", out);
+}
+
+test "buildCodeLenses range pins to decl line" {
+    const a = std.testing.allocator;
+    // The `owned struct` keyword is on line 2 (0-indexed). The lens range
+    // must start there with character 0.
+    const src =
+        \\// header comment
+        \\
+        \\owned struct Box {
+        \\    n: usize,
+        \\    pub fn deinit(self: *Box) void { _ = self; }
+        \\}
+    ;
+    const out = try buildCodeLenses(a, src);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"start\":{\"line\":2,\"character\":0}") != null);
 }
