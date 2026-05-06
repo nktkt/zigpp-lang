@@ -4,6 +4,40 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.35](https://github.com/nktkt/zigpp-lang/compare/v0.1.34...v0.1.35) (2026-05-06)
+
+
+### Features
+
+* **vscode:** grammar + snippets for v0.2 features (structural / .noasync / .custom) ([fc416db](https://github.com/nktkt/zigpp-lang/commit/fc416dbd4faa2bb51c63d7b176b3d8a1cd1ded2d))
+* **vscode:** grammar + snippets for v0.2 features (structural / .noasync / .custom) ([1d9fa44](https://github.com/nktkt/zigpp-lang/commit/1d9fa44b329431876e580b8749113698d038ed06))
+
+
+### Fixes
+
+* **cli:** explain --list --json now emits hint as `summary` ([e4c3024](https://github.com/nktkt/zigpp-lang/commit/e4c302493797ccd608ef83645c46700c8b04956b))
+* **cli:** explain --list --json now emits hint as `summary` ([e247917](https://github.com/nktkt/zigpp-lang/commit/e2479171b64c00fcefa729ce300d21c47a571bf1))
+* harden onHover against malformed JSON, escape `zpp doc` headings, correct Owned.deinit doc ([619b83e](https://github.com/nktkt/zigpp-lang/commit/619b83e5b1770ef7e835647c3b36778b297cf676))
+* harden onHover against malformed JSON, escape `zpp doc` headings, correct Owned.deinit doc ([2f1c700](https://github.com/nktkt/zigpp-lang/commit/2f1c7001d2979ae8012cec0845dc4306b635f943))
+
+
+### Documentation
+
+* add a CLI reference page ([76ffe3e](https://github.com/nktkt/zigpp-lang/commit/76ffe3e968a530b183d78647bc9848af2084618a))
+* add a Lowering reference page ([d4b5a52](https://github.com/nktkt/zigpp-lang/commit/d4b5a5226517387d57884e93dddf8a6693362f40))
+* add a Runtime library reference page ([5a447cb](https://github.com/nktkt/zigpp-lang/commit/5a447cb9d258cb23093b0cc360177fcc4bbb52cc))
+* add CLI reference page (every zpp subcommand) ([cda2b72](https://github.com/nktkt/zigpp-lang/commit/cda2b729dec9ba3be1a7b65fd53d876c5f62b225))
+* add Lowering reference page (.zpp ↔ .zig) ([af27e6a](https://github.com/nktkt/zigpp-lang/commit/af27e6abc0c5c6384160b782e9d9fc5b2fd5948e))
+* add Runtime library reference page ([a5e1d75](https://github.com/nktkt/zigpp-lang/commit/a5e1d75908edb54c0e11a7b4870eef16552d84a3))
+* **diagnostics:** add Z0002 (structural impl missing method) ([7e8250d](https://github.com/nktkt/zigpp-lang/commit/7e8250d319d6747a3d5e5e277ab8161527b2ca05))
+* **diagnostics:** add Z0002 (structural impl missing method) ([f92efd7](https://github.com/nktkt/zigpp-lang/commit/f92efd76ad1e6979cf8add8890d5378c14fb447f))
+* **examples:** drop stale notes that contradict landed features ([b052c5c](https://github.com/nktkt/zigpp-lang/commit/b052c5c9dd78accc9fae43aa2239d5f114e0edc8))
+* **examples:** drop stale notes that contradict landed features ([ffddd87](https://github.com/nktkt/zigpp-lang/commit/ffddd874fa17852784daa01083a1e994a8ecd362))
+* **v0.2 follow-up:** add Z0002 page, highlight `invariant`, fix two stale example notes, sync plugin scaffold ([7f0c163](https://github.com/nktkt/zigpp-lang/commit/7f0c1632298900c382a84581210cd7dc96ce0c1d))
+* **v0.2 follow-up:** add Z0002 page, highlight `invariant`, fix two stale example notes, sync plugin scaffold ([12b5eb4](https://github.com/nktkt/zigpp-lang/commit/12b5eb41a56cd7bb6b029761580a3e37b07ac374))
+* v0.2 release shakeout — re-document `zpp test`, correct bench / Phase 5 / Z0011 claims ([d5e0eef](https://github.com/nktkt/zigpp-lang/commit/d5e0eef452271852c9615df1cfa044200ad6575c))
+* v0.2 release shakeout — re-document `zpp test`, correct bench/effects/Z0011 claims ([89e81a0](https://github.com/nktkt/zigpp-lang/commit/89e81a00ed59a57ed7a8c829d02684b3a29c3cc4))
+
 ## [0.1.34](https://github.com/nktkt/zigpp-lang/compare/v0.1.33...v0.1.34) (2026-05-06)
 
 
