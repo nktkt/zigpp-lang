@@ -790,17 +790,68 @@ fn cmdLsp(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
 }
 
 fn cmdExplain(args: [][:0]u8) !ExitCode {
-    if (args.len != 1) {
-        ePrint("zpp explain: expected exactly one argument (Z#### code or --list)\n", .{});
+    // Parse a tiny CLI: one optional `--json` flag (`-j` is also accepted)
+    // and either zero positional args (must be combined with `--list` /
+    // `-l`) or exactly one positional arg (a code id or the list flag).
+    // Order is irrelevant: `zpp explain --json Z0030` and `zpp explain
+    // Z0030 --json` both work.
+    var json_mode = false;
+    var list_mode = false;
+    var positional: ?[]const u8 = null;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--json") or std.mem.eql(u8, a, "-j")) {
+            json_mode = true;
+        } else if (std.mem.eql(u8, a, "--list") or std.mem.eql(u8, a, "-l")) {
+            list_mode = true;
+        } else {
+            if (positional != null) {
+                ePrint("zpp explain: expected at most one diagnostic code\n", .{});
+                return .usage_error;
+            }
+            positional = a;
+        }
+    }
+    if (!list_mode and positional == null) {
+        ePrint("zpp explain: expected a Z#### code or --list\n", .{});
         return .usage_error;
     }
-    const arg = args[0];
-    if (std.mem.eql(u8, arg, "--list") or std.mem.eql(u8, arg, "-l")) {
+    if (list_mode and positional != null) {
+        ePrint("zpp explain: --list takes no code argument\n", .{});
+        return .usage_error;
+    }
+
+    var allocator_state = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = allocator_state.deinit();
+    const allocator = allocator_state.allocator();
+
+    if (list_mode) {
+        if (json_mode) {
+            const json_text = renderListJsonAlloc(allocator) catch |e| {
+                ePrint("zpp explain: failed to render JSON: {s}\n", .{@errorName(e)});
+                return .compiler_bug;
+            };
+            defer allocator.free(json_text);
+            try writeAll(outStream(), json_text);
+            try writeAll(outStream(), "\n");
+            return .ok;
+        }
         return cmdExplainList();
     }
+
+    const arg = positional.?;
     // Accept lower- or upper-case input; normalize to upper for lookup.
     var upper_buf: [16]u8 = undefined;
     if (arg.len > upper_buf.len) {
+        if (json_mode) {
+            const json_text = renderUnknownJsonAlloc(allocator, arg) catch |e| {
+                ePrint("zpp explain: failed to render JSON: {s}\n", .{@errorName(e)});
+                return .compiler_bug;
+            };
+            defer allocator.free(json_text);
+            try writeAll(outStream(), json_text);
+            try writeAll(outStream(), "\n");
+            return .user_error;
+        }
         ePrint("zpp explain: '{s}' is not a recognized code\n", .{arg});
         return .user_error;
     }
@@ -808,10 +859,32 @@ fn cmdExplain(args: [][:0]u8) !ExitCode {
     const upper = upper_buf[0..arg.len];
 
     const code = compiler.diagnostics.codeFromId(upper) orelse {
+        if (json_mode) {
+            const json_text = renderUnknownJsonAlloc(allocator, arg) catch |e| {
+                ePrint("zpp explain: failed to render JSON: {s}\n", .{@errorName(e)});
+                return .compiler_bug;
+            };
+            defer allocator.free(json_text);
+            try writeAll(outStream(), json_text);
+            try writeAll(outStream(), "\n");
+            return .user_error;
+        }
         ePrint("zpp explain: unknown diagnostic code '{s}'\n", .{arg});
         ePrint("       run `zpp explain --list` to see every code.\n", .{});
         return .user_error;
     };
+
+    if (json_mode) {
+        const json_text = renderCodeJsonAlloc(allocator, code) catch |e| {
+            ePrint("zpp explain: failed to render JSON: {s}\n", .{@errorName(e)});
+            return .compiler_bug;
+        };
+        defer allocator.free(json_text);
+        try writeAll(outStream(), json_text);
+        try writeAll(outStream(), "\n");
+        return .ok;
+    }
+
     oPrint("{s}\n", .{compiler.diagnostics.explain(code)});
     return .ok;
 }
@@ -823,6 +896,260 @@ fn cmdExplainList() !ExitCode {
     }
     oPrint("\nRun `zpp explain Z####` for the full description, triggering example, and fix.\n", .{});
     return .ok;
+}
+
+// --------------------------------------------------------------------------
+// JSON output for `zpp explain --json` and `zpp explain --list --json`.
+//
+// Output is consumed by IDEs / tooling, so the format is fixed:
+//
+//   single-code mode:
+//     { "code": "Z####",
+//       "title": "<one-line description>",
+//       "summary": "<short fix-it hint, single line>",
+//       "explain": "<full multi-paragraph text>",
+//       "examples": [
+//         { "kind": "trigger" | "fix", "snippet": "..." },
+//         ...
+//       ]   <-- omitted entirely if heuristic parsing fails
+//     }
+//
+//   list mode:
+//     { "codes": [
+//         { "code": "Z####", "title": "...", "summary": "..." },
+//         ...
+//       ] }
+//
+//   unknown-code mode (also exit code 1):
+//     { "error": "unknown diagnostic code", "code": "<as typed>" }
+//
+// The parser for `examples` is a small heuristic over the existing
+// `explain(code)` text shape. Every entry today follows the pattern
+// `Triggers[ (...)]:` / `Fix[ (...)]:` followed by 4-space-indented code.
+// If any entry fails to parse cleanly we drop the `examples` field (rather
+// than emit a broken / partial array) so consumers can rely on the explain
+// text as the source of truth.
+// --------------------------------------------------------------------------
+
+fn renderCodeJsonAlloc(
+    allocator: std.mem.Allocator,
+    code: compiler.diagnostics.Code,
+) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try writeCodeJson(allocator, &aw.writer, code);
+    return aw.toOwnedSlice();
+}
+
+fn renderListJsonAlloc(allocator: std.mem.Allocator) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try writeListJson(&aw.writer);
+    return aw.toOwnedSlice();
+}
+
+fn renderUnknownJsonAlloc(
+    allocator: std.mem.Allocator,
+    requested: []const u8,
+) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try writeUnknownJson(&aw.writer, requested);
+    return aw.toOwnedSlice();
+}
+
+/// Write the JSON document for one diagnostic code into `writer`.
+/// `allocator` is used only for transient parsing / hint-flattening
+/// buffers and is fully released before returning.
+fn writeCodeJson(
+    allocator: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    code: compiler.diagnostics.Code,
+) !void {
+    var s: std.json.Stringify = .{ .writer = writer, .options = .{} };
+
+    const explain_text = compiler.diagnostics.explain(code);
+    const title = compiler.diagnostics.summary(code);
+
+    const summary_buf = try flattenHint(allocator, code);
+    defer allocator.free(summary_buf);
+
+    try s.beginObject();
+    try s.objectField("code");
+    try s.write(code.id());
+    try s.objectField("title");
+    try s.write(title);
+    try s.objectField("summary");
+    try s.write(summary_buf);
+    try s.objectField("explain");
+    try s.write(explain_text);
+
+    if (try parseExamples(allocator, explain_text)) |examples| {
+        defer {
+            for (examples) |ex| allocator.free(ex.snippet);
+            allocator.free(examples);
+        }
+        try s.objectField("examples");
+        try s.beginArray();
+        for (examples) |ex| {
+            try s.beginObject();
+            try s.objectField("kind");
+            try s.write(ex.kind);
+            try s.objectField("snippet");
+            try s.write(ex.snippet);
+            try s.endObject();
+        }
+        try s.endArray();
+    }
+
+    try s.endObject();
+}
+
+fn writeListJson(writer: *std.Io.Writer) !void {
+    var s: std.json.Stringify = .{ .writer = writer, .options = .{} };
+    try s.beginObject();
+    try s.objectField("codes");
+    try s.beginArray();
+    for (compiler.diagnostics.all_codes) |code| {
+        const title = compiler.diagnostics.summary(code);
+        try s.beginObject();
+        try s.objectField("code");
+        try s.write(code.id());
+        try s.objectField("title");
+        try s.write(title);
+        try s.objectField("summary");
+        try s.write(title);
+        try s.endObject();
+    }
+    try s.endArray();
+    try s.endObject();
+}
+
+fn writeUnknownJson(writer: *std.Io.Writer, requested: []const u8) !void {
+    var s: std.json.Stringify = .{ .writer = writer, .options = .{} };
+    try s.beginObject();
+    try s.objectField("error");
+    try s.write("unknown diagnostic code");
+    try s.objectField("code");
+    try s.write(requested);
+    try s.endObject();
+}
+
+/// Collapse a multi-line hint into a single line so it fits the JSON
+/// `summary` slot. Falls back to `summary(code)` when there is no hint.
+fn flattenHint(
+    allocator: std.mem.Allocator,
+    code: compiler.diagnostics.Code,
+) ![]u8 {
+    if (compiler.diagnostics.hint(code)) |h| {
+        var out = std.ArrayList(u8){};
+        defer out.deinit(allocator);
+        var prev_space = false;
+        for (h) |c| {
+            const ch: u8 = switch (c) {
+                '\n', '\r', '\t' => ' ',
+                else => c,
+            };
+            if (ch == ' ') {
+                if (!prev_space and out.items.len > 0) try out.append(allocator, ' ');
+                prev_space = true;
+            } else {
+                try out.append(allocator, ch);
+                prev_space = false;
+            }
+        }
+        // Trim trailing space.
+        while (out.items.len > 0 and out.items[out.items.len - 1] == ' ') {
+            _ = out.pop();
+        }
+        return out.toOwnedSlice(allocator);
+    }
+    return try allocator.dupe(u8, compiler.diagnostics.summary(code));
+}
+
+const Example = struct {
+    kind: []const u8, // "trigger" or "fix" — borrowed string literal, no free
+    snippet: []u8, // owned; caller frees
+};
+
+/// Heuristic parser over the explain-text shape. Looks for lines whose
+/// stripped form starts with `Triggers` or `Fix` and ends with `:`,
+/// then collects subsequent 4-space-indented lines as the snippet body.
+/// On any inconsistency returns `null`; the caller then omits the
+/// `examples` field so consumers cannot mistake a partial parse for the
+/// full set.
+fn parseExamples(
+    allocator: std.mem.Allocator,
+    text: []const u8,
+) !?[]Example {
+    var found = std.ArrayList(Example){};
+    errdefer {
+        for (found.items) |ex| allocator.free(ex.snippet);
+        found.deinit(allocator);
+    }
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var pending_kind: ?[]const u8 = null;
+    var snippet = std.ArrayList(u8){};
+    defer snippet.deinit(allocator);
+
+    while (lines.next()) |line| {
+        if (pending_kind) |kind| {
+            // Collect indented (4-space) lines or completely blank lines.
+            // A non-blank, non-indented line ends the snippet.
+            const is_blank = std.mem.indexOfNone(u8, line, " \t") == null;
+            const is_indented = line.len >= 4 and std.mem.eql(u8, line[0..4], "    ");
+            if (is_indented) {
+                if (snippet.items.len > 0) try snippet.append(allocator, '\n');
+                try snippet.appendSlice(allocator, line[4..]);
+            } else if (is_blank) {
+                // Blank lines inside a snippet are tolerated as separators
+                // until the next non-blank decides whether we are still in
+                // the snippet.
+                continue;
+            } else {
+                // Snippet ended. Save what we have (if any).
+                if (snippet.items.len > 0) {
+                    const owned = try snippet.toOwnedSlice(allocator);
+                    try found.append(allocator, .{ .kind = kind, .snippet = owned });
+                    snippet = .{};
+                }
+                pending_kind = null;
+                // Fall through so this same line can start a new section.
+            }
+        }
+        if (pending_kind == null) {
+            const stripped = std.mem.trim(u8, line, " \t");
+            if (stripped.len == 0) continue;
+            // Match `Triggers[...]:` or `Fix[...]:`. Anything else
+            // (e.g. `Or restructure...`, free prose) is ignored.
+            if (std.mem.startsWith(u8, stripped, "Triggers") and
+                std.mem.endsWith(u8, stripped, ":"))
+            {
+                pending_kind = "trigger";
+            } else if (std.mem.startsWith(u8, stripped, "Fix") and
+                std.mem.endsWith(u8, stripped, ":"))
+            {
+                pending_kind = "fix";
+            }
+        }
+    }
+    // Flush any trailing snippet.
+    if (pending_kind) |kind| {
+        if (snippet.items.len > 0) {
+            const owned = try snippet.toOwnedSlice(allocator);
+            try found.append(allocator, .{ .kind = kind, .snippet = owned });
+            snippet = .{};
+        }
+    }
+
+    if (found.items.len == 0) {
+        // Nothing parsed — the heuristic doesn't know what to do, so let
+        // the caller omit the field rather than emit `[]`.
+        found.deinit(allocator);
+        return null;
+    }
+    return try found.toOwnedSlice(allocator);
 }
 
 const tpl_main_zpp = @embedFile("templates/main.zpp");
@@ -1134,4 +1461,112 @@ test "snapshotChanged detects new file and updates prev" {
     const after_add = try snapshotChanged(a, &roots, &snap);
     try std.testing.expect(after_add);
     try std.testing.expectEqual(@as(usize, 2), snap.count());
+}
+
+// --------------------------------------------------------------------------
+// `zpp explain --json` helpers — driven through their writer-buffer entry
+// points (renderXxxJsonAlloc) so we don't go through stdout. The
+// `zig test --listen=-` IPC chokes on direct stdout writes, so every test
+// here serializes into an allocator-backed buffer and parses it with
+// `std.json.parseFromSlice` to assert validity + shape.
+// --------------------------------------------------------------------------
+
+test "explain --json single code emits parseable JSON with right code field" {
+    const a = std.testing.allocator;
+
+    const json_text = try renderCodeJsonAlloc(a, .z0030_effect_violation);
+    defer a.free(json_text);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, json_text, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    try std.testing.expectEqualStrings("Z0030", root.get("code").?.string);
+    // Title comes from summary(code) — the first line of explain() with the
+    // "Z####: " prefix stripped.
+    try std.testing.expect(root.get("title").?.string.len > 0);
+    try std.testing.expect(root.get("summary").?.string.len > 0);
+    try std.testing.expect(root.get("explain").?.string.len > 50);
+    // Z0030 has both `Triggers:` (with snippet) and a prose `Fix: drop ...`,
+    // so the parser should produce exactly one example (the trigger).
+    const examples = root.get("examples").?.array;
+    try std.testing.expect(examples.items.len >= 1);
+    try std.testing.expectEqualStrings("trigger", examples.items[0].object.get("kind").?.string);
+}
+
+test "explain --json --list emits parseable JSON with all codes" {
+    const a = std.testing.allocator;
+
+    const json_text = try renderListJsonAlloc(a);
+    defer a.free(json_text);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, json_text, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    const codes = root.get("codes").?.array;
+    // Spec only requires "at least 5". Today we have 16; allow growth.
+    try std.testing.expect(codes.items.len >= 5);
+    // Each entry has the contracted shape.
+    for (codes.items) |entry| {
+        const obj = entry.object;
+        const code_val = obj.get("code").?.string;
+        try std.testing.expect(std.mem.startsWith(u8, code_val, "Z"));
+        try std.testing.expect(obj.get("title").?.string.len > 0);
+        try std.testing.expect(obj.get("summary").?.string.len > 0);
+    }
+}
+
+test "explain --json unknown code emits error JSON doc" {
+    const a = std.testing.allocator;
+
+    const json_text = try renderUnknownJsonAlloc(a, "Zxxxx");
+    defer a.free(json_text);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, json_text, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    try std.testing.expectEqualStrings("unknown diagnostic code", root.get("error").?.string);
+    try std.testing.expectEqualStrings("Zxxxx", root.get("code").?.string);
+}
+
+test "explain --json escapes control characters and quotes" {
+    const a = std.testing.allocator;
+    // The unknown-code path passes the requested string through verbatim,
+    // so we use it to spot-check that std.json.Stringify escapes properly.
+    const json_text = try renderUnknownJsonAlloc(a, "weird \"\n\\quote");
+    defer a.free(json_text);
+
+    // Re-parse must succeed and round-trip the bytes.
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, json_text, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(
+        "weird \"\n\\quote",
+        parsed.value.object.get("code").?.string,
+    );
+}
+
+test "parseExamples extracts trigger and fix snippets from a known code" {
+    const a = std.testing.allocator;
+    const text = compiler.diagnostics.explain(.z0021_borrow_invalidated_by_move);
+    const examples = (try parseExamples(a, text)) orelse @panic("expected examples");
+    defer {
+        for (examples) |ex| a.free(ex.snippet);
+        a.free(examples);
+    }
+    // Z0021 has `Triggers:` then `Fix (let the borrow end first):` — both
+    // followed by indented code — so we expect exactly two entries.
+    try std.testing.expectEqual(@as(usize, 2), examples.len);
+    try std.testing.expectEqualStrings("trigger", examples[0].kind);
+    try std.testing.expectEqualStrings("fix", examples[1].kind);
+    try std.testing.expect(examples[0].snippet.len > 0);
+    try std.testing.expect(examples[1].snippet.len > 0);
+}
+
+test "flattenHint produces a single-line summary" {
+    const a = std.testing.allocator;
+    const flat = try flattenHint(a, .z0010_missing_deinit_on_owned);
+    defer a.free(flat);
+    try std.testing.expect(flat.len > 0);
+    try std.testing.expect(std.mem.indexOfScalar(u8, flat, '\n') == null);
 }
