@@ -140,7 +140,7 @@
       "patterns": [
         {
           "name": "keyword.zigpp.extension",
-          "match": "\\b(trait|impl|dyn|using|owned|own|move|where|requires|ensures|effects|derive|interface)\\b"
+          "match": "\\b(trait|impl|dyn|using|owned|own|move|where|requires|ensures|effects|derive|interface|structural)\\b"
         }
       ]
     },
