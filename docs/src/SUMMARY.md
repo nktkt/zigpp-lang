@@ -12,6 +12,7 @@
 # Reference
 
 - [Language spec](./language.md)
+- [Lowering](./lowering.md)
 - [Diagnostics](./diagnostics.md)
 - [Examples](./examples.md)
 - [API reference](./api/index.md)
