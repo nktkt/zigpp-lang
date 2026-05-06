@@ -178,7 +178,7 @@ fn cmdHelp(args: [][:0]u8) !ExitCode {
         .run => "zpp run <file.zpp>\n  Lower a single .zpp source, write it to a tmp file, and execute it via `zig run`.\n",
         .lower => "zpp lower <file.zpp>\n  Print lowered .zig source for one file to stdout.\n",
         .fmt => "zpp fmt [paths...]\n  Re-emit .zpp files with canonical whitespace; expands directories.\n",
-        .check => "zpp check [paths...]\n  Parse and semantically analyse .zpp files; emit diagnostics; exit 1 on error.\n",
+        .check => "zpp check [paths...]\n  Parse and semantically analyze .zpp files; emit diagnostics; exit 1 on error.\n",
         .watch => "zpp watch [paths...]\n  Snapshot .zpp file mtimes and re-run `zpp check` whenever any of them changes. Polls every ~500ms; Ctrl-C to exit.\n",
         .doc => "zpp doc [paths...]\n  Walk .zpp files and emit Markdown for trait/fn/struct/extern interface decls.\n",
         .migrate => "zpp migrate <file.zig>\n  Diff suggestions to convert defer/init/deinit patterns to Zig++.\n",
