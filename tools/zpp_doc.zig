@@ -359,9 +359,9 @@ fn emitMarkdownSection(allocator: std.mem.Allocator, out: *std.ArrayList(u8), ti
             try out.appendSlice(allocator, "\n\n");
             any = true;
         }
-        try out.appendSlice(allocator, "### ");
+        try out.appendSlice(allocator, "### `");
         try out.appendSlice(allocator, it.name);
-        try out.appendSlice(allocator, "\n\n");
+        try out.appendSlice(allocator, "`\n\n");
         try out.appendSlice(allocator, "```zig\n");
         try out.appendSlice(allocator, it.signature);
         try out.appendSlice(allocator, "\n```\n\n");
@@ -665,7 +665,7 @@ test "renderMarkdown emits sections" {
     const md = try renderMarkdown(a, "x.zpp", &items);
     defer a.free(md);
     try std.testing.expect(std.mem.indexOf(u8, md, "## Functions") != null);
-    try std.testing.expect(std.mem.indexOf(u8, md, "### foo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, md, "### `foo`") != null);
 }
 
 test "renderHtml escapes generics and emits anchors" {
