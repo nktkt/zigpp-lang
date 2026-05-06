@@ -12,6 +12,7 @@
 # Reference
 
 - [Language spec](./language.md)
+- [Diagnostics](./diagnostics.md)
 - [Examples](./examples.md)
 - [API reference](./api/index.md)
   - [hello_trait](./api/hello_trait.md)

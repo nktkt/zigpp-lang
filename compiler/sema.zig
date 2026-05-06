@@ -29,6 +29,18 @@ pub const SemaResult = struct {
     /// Method-name lists per trait so impl checks can cross-verify.
     /// Slices reference the original AST arena and are not freed here.
     trait_methods: std.StringHashMap([]const ast.TraitMethod),
+    /// Set of trait names declared with `: structural`. Subset of `traits`.
+    /// `impl T for X` for a structural T relaxes the Z0040 "missing trait
+    /// method" check (callers can satisfy structural traits without an impl
+    /// block at all) and instead enables the dual Z0002 check: every method
+    /// listed in the impl block must correspond to a method on X.
+    structural_traits: std.StringHashMap(void),
+    /// Map of struct / owned-struct names → list of method names declared
+    /// directly on the type. Used by the Z0002 structural check to verify
+    /// that an impl block for a structural trait only re-exports methods
+    /// that actually exist on the target type. Slices reference the AST
+    /// arena and are not freed here.
+    type_methods: std.StringHashMap([]const []const u8),
     /// Map of owned-struct names → whether they have a deinit method.
     owned_structs: std.StringHashMap(bool),
     /// Inferred effect set per same-file fn name. Populated by the four
@@ -45,6 +57,12 @@ pub const SemaResult = struct {
     pub fn deinit(self: *SemaResult) void {
         self.traits.deinit();
         self.trait_methods.deinit();
+        self.structural_traits.deinit();
+        // The slices stored in `type_methods` live in the SemaResult's own
+        // allocator (see `collectDecls`) — free each before the map itself.
+        var tm_it = self.type_methods.valueIterator();
+        while (tm_it.next()) |slice| self.allocator.free(slice.*);
+        self.type_methods.deinit();
         self.owned_structs.deinit();
         self.inferred_effects.deinit();
         var it = self.inferred_custom_effects.valueIterator();
@@ -66,6 +84,8 @@ pub const Sema = struct {
             .allocator = self.allocator,
             .traits = std.StringHashMap(void).init(self.allocator),
             .trait_methods = std.StringHashMap([]const ast.TraitMethod).init(self.allocator),
+            .structural_traits = std.StringHashMap(void).init(self.allocator),
+            .type_methods = std.StringHashMap([]const []const u8).init(self.allocator),
             .owned_structs = std.StringHashMap(bool).init(self.allocator),
             .inferred_effects = std.StringHashMap(InferredEffects).init(self.allocator),
             .inferred_custom_effects = CustomEffectMap.init(self.allocator),
@@ -87,12 +107,12 @@ pub const Sema = struct {
     }
 
     fn collectDecls(self: *Sema, file: *const ast.File, r: *SemaResult) !void {
-        _ = self;
         for (file.decls) |d| {
             switch (d) {
                 .trait => |t| {
                     try r.traits.put(t.name, {});
                     try r.trait_methods.put(t.name, t.methods);
+                    if (t.is_structural) try r.structural_traits.put(t.name, {});
                 },
                 .extern_interface => |e| {
                     try r.traits.put(e.name, {});
@@ -107,10 +127,52 @@ pub const Sema = struct {
                         }
                     }
                     try r.owned_structs.put(o.name, has_deinit);
+                    try self.recordTypeMethods(r, o.name, o.fns, o.fields_text);
+                },
+                .struct_decl => |s| {
+                    try self.recordTypeMethods(r, s.name, s.fns, s.fields_text);
                 },
                 else => {},
             }
         }
+    }
+
+    /// Build the per-type method-name list used by Z0002. We dedupe within
+    /// a single type but not across decls; if two structs share a name (a
+    /// pathological case the rest of sema doesn't try to resolve either)
+    /// the first wins. The slice is owned by `r.allocator` and freed in
+    /// `SemaResult.deinit`.
+    ///
+    /// `fields_text` is also scanned for `(pub )?fn <name>(` shapes — the
+    /// `const X = struct { ... }` parser variant captures the entire body
+    /// as opaque text (its `fns` is always empty), so the structural Z0002
+    /// check would otherwise see no methods on it. Scanning the raw text
+    /// is a heuristic but matches the same shape the lowerer already
+    /// emits.
+    fn recordTypeMethods(
+        self: *Sema,
+        r: *SemaResult,
+        name: []const u8,
+        fns: []const ast.FnDecl,
+        fields_text: []const u8,
+    ) !void {
+        if (r.type_methods.contains(name)) return;
+
+        var collected: std.ArrayList([]const u8) = .{};
+        defer collected.deinit(self.allocator);
+
+        for (fns) |fd| try collected.append(self.allocator, fd.sig.name);
+
+        // Scan fields_text for additional `fn <name>(` decls (handles the
+        // `const X = struct { ... }` form whose body is captured as raw
+        // text). String / char / `//` comment escaping is reused so a fn
+        // name mentioned in a doc string doesn't fool the heuristic.
+        try collectFnDeclNames(fields_text, &collected, self.allocator);
+
+        const buf = try self.allocator.alloc([]const u8, collected.items.len);
+        errdefer self.allocator.free(buf);
+        for (collected.items, 0..) |n, idx| buf[idx] = n;
+        try r.type_methods.put(name, buf);
     }
 
     fn checkOwnedStructs(self: *Sema, file: *const ast.File, r: *SemaResult) !void {
@@ -154,12 +216,54 @@ pub const Sema = struct {
                         );
                         continue;
                     }
+                    if (r.structural_traits.contains(i.trait_name)) {
+                        // Structural trait: an `impl T for X` is *opt-in*
+                        // — methods that aren't listed here are allowed to
+                        // be satisfied by X's own definition. We still
+                        // verify every method that IS listed corresponds
+                        // to an existing method on X, otherwise the
+                        // generated thunk would dangle. Missing methods on
+                        // X → Z0002.
+                        const type_fns = r.type_methods.get(i.target_type);
+                        var missing_on_type: std.ArrayList([]const u8) = .{};
+                        defer missing_on_type.deinit(self.allocator);
+                        if (type_fns) |fns_list| {
+                            for (i.fns) |fd| {
+                                var found = false;
+                                for (fns_list) |existing_name| {
+                                    if (std.mem.eql(u8, existing_name, fd.sig.name)) {
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                if (!found) try missing_on_type.append(self.allocator, fd.sig.name);
+                            }
+                        }
+                        if (missing_on_type.items.len > 0) {
+                            const list = try joinNames(self.allocator, missing_on_type.items);
+                            defer self.allocator.free(list);
+                            try self.diags.emit(
+                                .err,
+                                .z0002_structural_violation,
+                                i.span,
+                                "impl {s} for {s}: structural trait method(s) {s} not declared on {s}",
+                                .{ i.trait_name, i.target_type, list, i.target_type },
+                            );
+                        }
+                        continue;
+                    }
+
                     // Cross-check that every method declared by the trait is
-                    // present in this impl. Missing methods → Z0040.
+                    // present in this impl. Missing methods → Z0040, but only
+                    // for *required* methods (no default body). Methods that
+                    // carry a default body in the trait are optional in impls;
+                    // their default body is used as fallback at lowering time.
                     const methods = r.trait_methods.get(i.trait_name) orelse continue;
                     var missing: std.ArrayList([]const u8) = .{};
                     defer missing.deinit(self.allocator);
                     for (methods) |m| {
+                        // Skip optional (default-bodied) methods entirely.
+                        if (m.body != null) continue;
                         var found = false;
                         for (i.fns) |fd| {
                             if (std.mem.eql(u8, fd.sig.name, m.name)) {
@@ -1254,6 +1358,66 @@ pub const Sema = struct {
         }
     }
 };
+
+/// Scan `text` for `(pub )?fn <ident>(` declarations and append each
+/// identifier to `out` (deduplicating against entries already present).
+/// String / char / `//` comments are skipped so `fn` names mentioned in
+/// doc strings don't count. The slice handed back references `text`'s
+/// underlying buffer and must outlive `out`.
+fn collectFnDeclNames(
+    text: []const u8,
+    out: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+) !void {
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = text[i];
+        if (c == '"') {
+            i += 1;
+            while (i < text.len) : (i += 1) {
+                if (text[i] == '\\' and i + 1 < text.len) { i += 1; continue; }
+                if (text[i] == '"') { i += 1; break; }
+            }
+            continue;
+        }
+        if (c == '\'') {
+            i += 1;
+            while (i < text.len and text[i] != '\'') : (i += 1) {
+                if (text[i] == '\\' and i + 1 < text.len) i += 1;
+            }
+            if (i < text.len) i += 1;
+            continue;
+        }
+        if (c == '/' and i + 1 < text.len and text[i + 1] == '/') {
+            while (i < text.len and text[i] != '\n') i += 1;
+            continue;
+        }
+        // Look for a token-aligned `fn` keyword.
+        if (c == 'f' and i + 2 <= text.len and text[i + 1] == 'n') {
+            const prev_ok = i == 0 or !isIdent(text[i - 1]);
+            const after = i + 2;
+            const sep_ok = after < text.len and !isIdent(text[after]);
+            if (prev_ok and sep_ok) {
+                // Skip whitespace, then read the fn name.
+                var j = after;
+                while (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
+                const name_start = j;
+                while (j < text.len and isIdent(text[j])) j += 1;
+                if (j > name_start) {
+                    const name = text[name_start..j];
+                    var present = false;
+                    for (out.items) |existing| {
+                        if (std.mem.eql(u8, existing, name)) { present = true; break; }
+                    }
+                    if (!present) try out.append(allocator, name);
+                }
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
 
 /// Append `name` to `list` if it isn't already present (string comparison).
 /// Returns true when an insertion occurred. Slices stored verbatim — they

@@ -109,3 +109,50 @@ test "derive.Iterator yields field names in declaration order" {
     try std.testing.expectEqualStrings("flag", it.next().?);
     try std.testing.expect(it.next() == null);
 }
+
+// --- Trait default-body dispatch ---
+
+// Hand-rolled mirror of what `lower_to_zig.zig` emits for:
+//   trait Greeter {
+//       fn name(self) []const u8;
+//       fn greet(self) []const u8 { return "default"; }
+//   }
+//   const Hello = struct {};
+//   impl Greeter for Hello {
+//       fn name(self) []const u8 { _ = self; return "Hello"; }
+//   }
+// The point is: the default-body path must produce a fn-pointer with the
+// same shape as a thunk so the vtable slot is interchangeable.
+const Greeter_VTable = struct {
+    name: *const fn (ptr: *anyopaque) []const u8,
+    greet: *const fn (ptr: *anyopaque) []const u8,
+};
+
+fn Greeter_default_greet(self: *anyopaque) []const u8 {
+    _ = self;
+    return "default";
+}
+
+const Hello = struct {};
+
+fn Greeter_method_name_Hello(self: *Hello) []const u8 {
+    _ = self;
+    return "Hello";
+}
+
+fn Greeter_name_for_Hello(ptr: *anyopaque) []const u8 {
+    const self: *Hello = @ptrCast(@alignCast(ptr));
+    return Greeter_method_name_Hello(self);
+}
+
+const Greeter_impl_for_Hello: Greeter_VTable = .{
+    .name = Greeter_name_for_Hello,
+    .greet = Greeter_default_greet,
+};
+
+test "trait default body executes via vtable when impl omits the method" {
+    var hello = Hello{};
+    const ptr: *anyopaque = @ptrCast(&hello);
+    try std.testing.expectEqualStrings("Hello", Greeter_impl_for_Hello.name(ptr));
+    try std.testing.expectEqualStrings("default", Greeter_impl_for_Hello.greet(ptr));
+}

@@ -25,6 +25,10 @@ pub const Lowerer = struct {
     /// Set of trait names so that fn-param lowering knows what's a trait.
     trait_set: std.StringHashMap(void),
     extern_traits: std.StringHashMap(void),
+    /// Trait name -> method list. Lets `lowerImpl` look up default-bodied
+    /// methods that an impl may have omitted, so we can fall back to the
+    /// trait's `<Trait>_default_<method>` free fn for the vtable entry.
+    trait_methods: std.StringHashMap([]const ast.TraitMethod),
     /// Maps target type name -> list of impl blocks against it. Used to inject
     /// method bodies into parsed `const X = struct {...}` decls so that static
     /// dispatch (`who.greet()`) resolves through normal Zig method lookup.
@@ -48,6 +52,7 @@ pub const Lowerer = struct {
             .diags = diags,
             .trait_set = std.StringHashMap(void).init(allocator),
             .extern_traits = std.StringHashMap(void).init(allocator),
+            .trait_methods = std.StringHashMap([]const ast.TraitMethod).init(allocator),
             .impls_by_target = std.StringHashMap(std.ArrayList(*const ast.ImplBlock)).init(allocator),
             .inferred_effects = null,
             .inferred_custom = null,
@@ -86,6 +91,7 @@ pub const Lowerer = struct {
         self.out.deinit(self.allocator);
         self.trait_set.deinit();
         self.extern_traits.deinit();
+        self.trait_methods.deinit();
         var it = self.impls_by_target.valueIterator();
         while (it.next()) |list| list.deinit(self.allocator);
         self.impls_by_target.deinit();
@@ -110,10 +116,14 @@ pub const Lowerer = struct {
         // Collect trait names first so dyn/impl param lowering works regardless of order.
         for (file.decls) |d| {
             switch (d) {
-                .trait => |t| try self.trait_set.put(t.name, {}),
+                .trait => |t| {
+                    try self.trait_set.put(t.name, {});
+                    try self.trait_methods.put(t.name, t.methods);
+                },
                 .extern_interface => |e| {
                     try self.trait_set.put(e.name, {});
                     try self.extern_traits.put(e.name, {});
+                    try self.trait_methods.put(e.name, e.methods);
                 },
                 else => {},
             }
@@ -173,6 +183,32 @@ pub const Lowerer = struct {
 
         // Convenience type alias for dyn objects.
         try self.writeFmt("{s}const {s} = zpp.Dyn({s}_VTable);\n", .{ vis, t.name, t.name });
+
+        // Emit a free fn for every default-bodied method so impls that omit
+        // the method can fall back to it via the vtable. Signature uses
+        // `self: *anyopaque` so the same fn pointer fits any implementor.
+        for (t.methods) |m| {
+            if (m.body) |body_text| {
+                try self.writeFmt("fn {s}_default_{s}(self: *anyopaque", .{ t.name, m.name });
+                for (m.params) |p| {
+                    if (std.mem.eql(u8, p.name, "self")) continue;
+                    try self.writeFmt(", {s}: ", .{p.name});
+                    try self.writeRewrittenType(p.type_text);
+                }
+                try self.write(") ");
+                try self.writeRewrittenType(normalizeReturn(m.return_type));
+                try self.write(" {\n");
+                // Body is opaque source text; rewrite Zig++ keywords just like
+                // any other body. If the body never references `self`, suppress
+                // the unused-parameter error with a discard.
+                if (!textReferencesIdent(body_text, "self")) {
+                    try self.writeIndent(4);
+                    try self.write("_ = self;\n");
+                }
+                try self.writeRewrittenCode(body_text);
+                try self.write("\n}\n");
+            }
+        }
     }
 
     fn lowerImpl(self: *Lowerer, i: ast.ImplBlock) !void {
@@ -185,6 +221,25 @@ pub const Lowerer = struct {
         for (i.fns) |fd| {
             try self.writeIndent(4);
             try self.writeFmt(".{s} = {s}_{s}_for_{s},\n", .{ fd.sig.name, i.trait_name, fd.sig.name, i.target_type });
+        }
+        // For trait methods omitted by this impl that have a default body,
+        // wire the vtable entry to the trait's `<Trait>_default_<method>`.
+        // The fn already takes `self: *anyopaque` so it fits the vtable slot
+        // exactly (same shape as a regular thunk).
+        if (self.trait_methods.get(i.trait_name)) |methods| {
+            for (methods) |m| {
+                if (m.body == null) continue; // required, supplied or Z0040
+                var supplied = false;
+                for (i.fns) |fd| {
+                    if (std.mem.eql(u8, fd.sig.name, m.name)) {
+                        supplied = true;
+                        break;
+                    }
+                }
+                if (supplied) continue;
+                try self.writeIndent(4);
+                try self.writeFmt(".{s} = {s}_default_{s},\n", .{ m.name, i.trait_name, m.name });
+            }
         }
         try self.write("};\n");
     }
@@ -759,6 +814,43 @@ fn normalizeReturn(t: []const u8) []const u8 {
     const trimmed = std.mem.trim(u8, t, " \t\r\n");
     if (trimmed.len == 0) return "void";
     return trimmed;
+}
+
+/// True iff `text` mentions the bare identifier `name` outside of strings,
+/// char literals, or `//` comments. Used by the trait-default-body emitter
+/// to decide whether to insert `_ = self;` to silence unused-parameter
+/// errors when the default body never references `self`.
+fn textReferencesIdent(text: []const u8, name: []const u8) bool {
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = text[i];
+        // Skip string literal.
+        if (c == '"') {
+            i += 1;
+            while (i < text.len) : (i += 1) {
+                if (text[i] == '\\' and i + 1 < text.len) { i += 1; continue; }
+                if (text[i] == '"') { i += 1; break; }
+            }
+            continue;
+        }
+        // Skip char literal.
+        if (c == '\'') {
+            i += 1;
+            while (i < text.len and text[i] != '\'') : (i += 1) {
+                if (text[i] == '\\' and i + 1 < text.len) i += 1;
+            }
+            if (i < text.len) i += 1;
+            continue;
+        }
+        // Skip `//` line comment.
+        if (c == '/' and i + 1 < text.len and text[i + 1] == '/') {
+            while (i < text.len and text[i] != '\n') i += 1;
+            continue;
+        }
+        if (matchKeywordAt(text, i, name)) return true;
+        i += 1;
+    }
+    return false;
 }
 
 /// Pick a member-decl name for a derived helper.

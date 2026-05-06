@@ -155,7 +155,7 @@ pub const StdoutWriter = struct {
     }
 
     /// Build a `Writer` fat pointer from a `*StdoutWriter`. The vtable is
-    /// materialised once at comptime and stored as a `static const`.
+    /// materialized once at comptime and stored as a `static const`.
     pub fn writer(self: *StdoutWriter) Writer {
         return dyn.fromImpl(Writer_VTable, StdoutWriter, self, .{
             .{ "write", StdoutWriter.write },

@@ -2,15 +2,18 @@
 ///
 /// Teaches: every concurrency primitive in Zig++ is *explicit*. `spawn`
 /// schedules a task on the group, `join` blocks until every spawned task
-/// has completed. There is no implicit await, no hidden executor — the
-/// `TaskGroup` is just a struct that owns its workers.
+/// has completed, and a shared `CancellationToken` lets the main thread
+/// (or a failing sibling task) cooperatively stop everyone else. There
+/// is no implicit await and no hidden executor — the `TaskGroup` is just
+/// a struct that owns its workers.
 ///
 /// Lowered Zig sketch:
 ///     var group = zpp.async_mod.TaskGroup.init(allocator);
 ///     defer group.deinit();
 ///     _ = try group.spawn(work, .{0});
-///     _ = try group.spawn(work, .{1});
-///     try group.join();
+///     _ = try group.spawnWithToken(coopWork, .{1});
+///     group.cancel();
+///     _ = group.join() catch {};
 
 const std = @import("std");
 const zpp = @import("zpp");
@@ -22,18 +25,49 @@ fn work(id: u64) void {
     std.debug.print("task[{d}] = {d}\n", .{ id, acc });
 }
 
+/// Cooperative worker: receives the group's `CancellationToken` as the
+/// first argument (courtesy of `spawnWithToken`) and polls it. When the
+/// main thread or a failing sibling flips the token, this task returns
+/// `error.Cancelled` on its next iteration.
+fn coopWork(tok: *zpp.async_mod.CancellationToken, id: u64) error{Cancelled}!void {
+    var i: u64 = 0;
+    while (i < 1_000_000) : (i += 1) {
+        try tok.throwIfCancelled();
+        std.Thread.yield() catch {};
+    }
+    std.debug.print("coop[{d}] finished without cancel\n", .{id});
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var group = zpp.async_mod.TaskGroup.init(allocator);
-    defer group.deinit();
+    // Part 1: classic spawn + join.
+    {
+        var group = zpp.async_mod.TaskGroup.init(allocator);
+        defer group.deinit();
+        _ = try group.spawn(work, .{@as(u64, 1)});
+        _ = try group.spawn(work, .{@as(u64, 2)});
+        _ = try group.spawn(work, .{@as(u64, 3)});
+        try group.join();
+    }
 
-    _ = try group.spawn(work, .{@as(u64, 1)});
-    _ = try group.spawn(work, .{@as(u64, 2)});
-    _ = try group.spawn(work, .{@as(u64, 3)});
+    // Part 2: cooperative cancellation. Main thread flips the group
+    // token; long-running coop tasks observe it and bail out.
+    {
+        var group = zpp.async_mod.TaskGroup.init(allocator);
+        defer group.deinit();
+        _ = try group.spawnWithToken(coopWork, .{@as(u64, 10)});
+        _ = try group.spawnWithToken(coopWork, .{@as(u64, 11)});
+        _ = try group.spawnWithToken(coopWork, .{@as(u64, 12)});
+        group.cancel();
+        // join() returns the first error (`error.Cancelled`); we expect
+        // it here, so swallow it and report success.
+        group.join() catch |err| {
+            std.debug.print("coop group cancelled: {s}\n", .{@errorName(err)});
+        };
+    }
 
-    try group.join();
-    std.debug.print("(spawn and join are visible; the group is deinit'd by defer)\n", .{});
+    std.debug.print("(spawn, spawnWithToken, cancel, and join are visible)\n", .{});
 }
