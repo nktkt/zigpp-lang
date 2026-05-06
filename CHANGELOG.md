@@ -4,6 +4,52 @@ All notable changes to Zig++ are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.34](https://github.com/nktkt/zigpp-lang/compare/v0.1.33...v0.1.34) (2026-05-06)
+
+
+### Features
+
+* **cli:** build.zpp thin alias — auto-lower to build.zig ([#93](https://github.com/nktkt/zigpp-lang/issues/93)) ([3a7df98](https://github.com/nktkt/zigpp-lang/commit/3a7df9888faf8674c6f7e4f4ae0e7ecb08654f7b))
+* **cli:** zpp explain --json — IDE-consumable diagnostic data ([#100](https://github.com/nktkt/zigpp-lang/issues/100)) ([2296666](https://github.com/nktkt/zigpp-lang/commit/22966669e25f8527f7b53b20e2a2be11e7bee8a1))
+* **cli:** zpp init --template lib | exe | plugin ([#105](https://github.com/nktkt/zigpp-lang/issues/105)) ([43facba](https://github.com/nktkt/zigpp-lang/commit/43facba95f2c94991183a99452811e0c2bbf6985))
+* **cli:** zpp test — run tests in .zpp files via zig test ([#96](https://github.com/nktkt/zigpp-lang/issues/96)) ([3ebddb3](https://github.com/nktkt/zigpp-lang/commit/3ebddb337253384f307874957c9326639ba50d8b))
+* **examples:** writer stack, structural advanced, effects demo ([#101](https://github.com/nktkt/zigpp-lang/issues/101)) ([b57f6cc](https://github.com/nktkt/zigpp-lang/commit/b57f6cc82eff1ee3b39cd023c078dd4c3cdcc148))
+* **examples:** writer_stdlib — consume zpp.writer trait from stdlib ([#113](https://github.com/nktkt/zigpp-lang/issues/113)) ([2a78b67](https://github.com/nktkt/zigpp-lang/commit/2a78b6769c096c4e8006c8d44e7b4d5f86dae436))
+* **lib:** Writer trait + Stdout/File/Buffered impls (Phase 2 stdlib) ([#97](https://github.com/nktkt/zigpp-lang/issues/97)) ([7ba0381](https://github.com/nktkt/zigpp-lang/commit/7ba0381e9deaf155dc2c7ab598c9215211be7bdf))
+* **lsp:** signatureHelp + typeDefinition (same-file) ([824b2b7](https://github.com/nktkt/zigpp-lang/commit/824b2b7d77c2fc77c654b26fedeb83ce743e0040))
+* **lsp:** textDocument/codeLens (effect / derive / owned lenses) ([#99](https://github.com/nktkt/zigpp-lang/issues/99)) ([ae58404](https://github.com/nktkt/zigpp-lang/commit/ae58404561d2786e310aca12b216fe1940a7fc7d))
+* **lsp:** textDocument/implementation + callHierarchy ([#95](https://github.com/nktkt/zigpp-lang/issues/95)) ([018a956](https://github.com/nktkt/zigpp-lang/commit/018a956de7a0b883897eb3a6c93cd94bc11c2f86))
+* **migrate:** 5 more rewrite patterns (panic→requires, deinit→owned, etc.) ([#98](https://github.com/nktkt/zigpp-lang/issues/98)) ([9836999](https://github.com/nktkt/zigpp-lang/commit/98369996a478bc44ffc9049d7fdbb84fc54b3f01))
+* **sema:** .noasync effect axis (round 6) ([#92](https://github.com/nktkt/zigpp-lang/issues/92)) ([be4d480](https://github.com/nktkt/zigpp-lang/commit/be4d480f30b2fd721ad4f9fb3a40cd151383c160))
+* **sema:** trait method default bodies ([#103](https://github.com/nktkt/zigpp-lang/issues/103)) ([7f75d78](https://github.com/nktkt/zigpp-lang/commit/7f75d78c5ef2ae4d2636093eb05f7d0855c19aed))
+* structural traits + HTML docs + LSP folds/hints + async cancel ([#91](https://github.com/nktkt/zigpp-lang/issues/91)) ([8288667](https://github.com/nktkt/zigpp-lang/commit/8288667ff31d9a93477ec65d7535ce98af64f868))
+* **traits:** unbounded trait method arity (lift the 5-param ceiling) ([#94](https://github.com/nktkt/zigpp-lang/issues/94)) ([26738b9](https://github.com/nktkt/zigpp-lang/commit/26738b954c625f80bc97d87f443cab66a5e6dca5))
+* **vscode:** advertise inlayHint/folding/implementation/callHierarchy/codeLens + 2 commands ([#104](https://github.com/nktkt/zigpp-lang/issues/104)) ([7eecac3](https://github.com/nktkt/zigpp-lang/commit/7eecac3e872a8948febf63973b2410af12580ada))
+
+
+### Refactors
+
+* **bench:** use writeAll for argument-free print calls ([#115](https://github.com/nktkt/zigpp-lang/issues/115)) ([d79387b](https://github.com/nktkt/zigpp-lang/commit/d79387bbc01bfcb2816348c052904e35dd7e5ffa))
+
+
+### Documentation
+
+* add a Diagnostics reference page ([#118](https://github.com/nktkt/zigpp-lang/issues/118)) ([23df3f4](https://github.com/nktkt/zigpp-lang/commit/23df3f4757881037ab55fade59b01aa8bcff5c91))
+* align LANGUAGE.md / MANIFESTO.md with the effects + derive set the compiler implements ([dda8bf1](https://github.com/nktkt/zigpp-lang/commit/dda8bf1aab2bb5410c238c86d780f2222b11fd5c))
+* align spec docs with the effects/derive sets the compiler actually implements ([797340d](https://github.com/nktkt/zigpp-lang/commit/797340d43752f1a8d5904b4a185473efa34c527a))
+* **language:** refresh for v0.2 (structural, defaults, .noasync, build.zpp, Writer, LSP) ([#106](https://github.com/nktkt/zigpp-lang/issues/106)) ([ba06295](https://github.com/nktkt/zigpp-lang/commit/ba0629599d2d51ff19a5c7b8026123f647668131))
+* **readme:** refresh "What works today" for v0.2 ([#107](https://github.com/nktkt/zigpp-lang/issues/107)) ([a0bb811](https://github.com/nktkt/zigpp-lang/commit/a0bb8115ce12a7330e7933eb4f7c18a9c1d81c07))
+* refresh examples index + bring README.ja.md to parity ([49f543c](https://github.com/nktkt/zigpp-lang/commit/49f543cde0bf21c4e8c39419bb642e11a102e594))
+* refresh examples index and bring README.ja.md to parity ([729588c](https://github.com/nktkt/zigpp-lang/commit/729588ccccfd965e179de4c567d5596db6a9b3a0))
+* remove `zpp test` claims (subcommand not implemented) and fix mangled [@effects](https://github.com/effects)Of links ([#120](https://github.com/nktkt/zigpp-lang/issues/120)) ([a41653a](https://github.com/nktkt/zigpp-lang/commit/a41653a8ca0141e2bae325d10cb2633aaf9ef32f))
+* **roadmap:** mark Phase 2/5/7 done and Phase 6 substantially done as of v0.2 ([#108](https://github.com/nktkt/zigpp-lang/issues/108)) ([735feb0](https://github.com/nktkt/zigpp-lang/commit/735feb00aecdcde825e577bade4a08c6ea023f7a))
+
+
+### CI
+
+* **deps:** Bump github/codeql-action from 4.35.2 to 4.35.3 ([0d3cfc0](https://github.com/nktkt/zigpp-lang/commit/0d3cfc0ac5befd158356d74febb01224a88caf4e))
+* **deps:** Bump github/codeql-action from 4.35.2 to 4.35.3 ([ee90461](https://github.com/nktkt/zigpp-lang/commit/ee904616c4ee91d8e3ee5fcab2281f264cd25aa8))
+
 ## [0.1.33](https://github.com/nktkt/zigpp-lang/compare/v0.1.32...v0.1.33) (2026-04-29)
 
 
