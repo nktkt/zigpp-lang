@@ -9,6 +9,8 @@ const cases = [_][]const u8{
     "structural_trait",
     "trait_default_method",
     "effects_noasync",
+    "effects_custom",
+    "trait_many_params",
 };
 
 const max_file_bytes: usize = 4 * 1024 * 1024;
@@ -162,6 +164,14 @@ test "snapshot: trait_default_method" {
 
 test "snapshot: effects_noasync" {
     try runOne(std.testing.allocator, "effects_noasync");
+}
+
+test "snapshot: effects_custom" {
+    try runOne(std.testing.allocator, "effects_custom");
+}
+
+test "snapshot: trait_many_params" {
+    try runOne(std.testing.allocator, "trait_many_params");
 }
 
 test "snapshot manifest is non-empty" {
