@@ -10,6 +10,7 @@ pub const InferredEffects = packed struct {
     alloc: bool = false,
     io: bool = false,
     panic: bool = false,
+    @"async": bool = false,
 };
 
 /// Per-fn list of `.custom("X")` effect names (the `X` slices, deduplicated).
@@ -79,6 +80,7 @@ pub const Sema = struct {
         try self.checkEffectInference(file, &result);
         try self.checkIoEffectInference(file, &result);
         try self.checkPanicEffectInference(file, &result);
+        try self.checkAsyncEffectInference(file, &result);
         try self.checkCustomEffectInference(file, &result);
 
         return result;
@@ -974,6 +976,141 @@ pub const Sema = struct {
         }
     }
 
+    /// Round 6 of the effect-inference MVP: same shape as
+    /// `checkPanicEffectInference` but for the `.async` / `.noasync` pair.
+    /// Run as a parallel pass after `.panic` so existing wiring stays
+    /// untouched.
+    ///
+    /// Heuristic for "direct async": the body text contains any of these
+    /// substrings (after stripping strings / chars / `//` line comments):
+    ///   `std.Thread.spawn`, `std.Thread.yield`, `TaskGroup`, `JoinHandle`,
+    ///   `spawnWithToken`, `CancellationToken`, `zpp.async`, `async.spawn`,
+    ///   `.spawn(`, `std.Io.` (forward-compat for Zig 0.17+ I/O), plus a
+    ///   word-boundary check for the Zig keywords `await ` and `suspend `
+    ///   (reserved for future use).
+    ///
+    /// `.noasync` is the corresponding denial. A fn that ends up with
+    /// `.async` in its inferred set after the fixed-point loop and that
+    /// declares `effects(.noasync)` triggers Z0030. The diagnostic is
+    /// anchored at the offending body stmt when the direct heuristic
+    /// matched in the same fn, otherwise at the fn's signature span
+    /// (purely transitive case).
+    fn checkAsyncEffectInference(self: *Sema, file: *const ast.File, result: *SemaResult) !void {
+        var fns: std.ArrayList(*const ast.FnDecl) = .{};
+        defer fns.deinit(self.allocator);
+        for (file.decls) |*d| {
+            switch (d.*) {
+                .fn_decl => |*fd| try fns.append(self.allocator, fd),
+                .impl_block => |ib| for (ib.fns) |*fd| try fns.append(self.allocator, fd),
+                .owned_struct => |os| for (os.fns) |*fd| try fns.append(self.allocator, fd),
+                .struct_decl => |sd| for (sd.fns) |*fd| try fns.append(self.allocator, fd),
+                else => {},
+            }
+        }
+        if (fns.items.len == 0) return;
+
+        var name_to_idx = std.StringHashMap(usize).init(self.allocator);
+        defer name_to_idx.deinit();
+        for (fns.items, 0..) |fd, i| {
+            const gop = try name_to_idx.getOrPut(fd.sig.name);
+            if (!gop.found_existing) gop.value_ptr.* = i;
+        }
+
+        const N = fns.items.len;
+        const direct = try self.allocator.alloc(bool, N);
+        defer self.allocator.free(direct);
+        const direct_span = try self.allocator.alloc(diag.Span, N);
+        defer self.allocator.free(direct_span);
+        const inferred = try self.allocator.alloc(bool, N);
+        defer self.allocator.free(inferred);
+
+        const calls = try self.allocator.alloc(std.ArrayList(usize), N);
+        defer {
+            for (calls) |*c| c.deinit(self.allocator);
+            self.allocator.free(calls);
+        }
+        for (calls) |*c| c.* = .{};
+
+        for (fns.items, 0..) |fd, i| {
+            direct[i] = false;
+            direct_span[i] = fd.sig.span;
+            inferred[i] = false;
+            const body = fd.body orelse continue;
+            for (body.stmts) |s| {
+                const text = switch (s) {
+                    .raw => |r| r.text,
+                    .using_stmt => |u| u.init_text,
+                    .own_decl => |o| o.init_text,
+                    else => continue,
+                };
+                if (!direct[i] and bodyDoesAsync(text)) {
+                    direct[i] = true;
+                    direct_span[i] = switch (s) {
+                        .raw => |r| r.span,
+                        .using_stmt => |u| u.span,
+                        .own_decl => |o| o.span,
+                        else => unreachable,
+                    };
+                }
+                try collectLocalCalls(text, &name_to_idx, &calls[i], self.allocator);
+            }
+            inferred[i] = direct[i];
+        }
+
+        var changed = true;
+        var rounds: usize = 0;
+        while (changed and rounds < N + 1) : (rounds += 1) {
+            changed = false;
+            for (fns.items, 0..) |_, i| {
+                if (inferred[i]) continue;
+                for (calls[i].items) |cid| {
+                    if (inferred[cid]) {
+                        inferred[i] = true;
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Tee the inferred .async bit into result.inferred_effects (see
+        // `checkEffectInference` for the rationale).
+        for (fns.items, 0..) |fd, i| {
+            const gop = try result.inferred_effects.getOrPut(fd.sig.name);
+            if (!gop.found_existing) gop.value_ptr.* = .{};
+            gop.value_ptr.@"async" = gop.value_ptr.@"async" or inferred[i];
+        }
+
+        for (fns.items, 0..) |fd, i| {
+            const ef = fd.sig.effects orelse continue;
+            var declared_noasync = false;
+            for (ef.effects) |e| {
+                if (e.kind == .noasync) declared_noasync = true;
+            }
+            if (!declared_noasync) continue;
+            if (!inferred[i]) continue;
+
+            const span = if (direct[i]) direct_span[i] else fd.sig.span;
+            if (direct[i]) {
+                try self.diags.emit(
+                    .err,
+                    .z0030_effect_violation,
+                    span,
+                    "fn '{s}' declared .noasync but inferred .async effect",
+                    .{fd.sig.name},
+                );
+            } else {
+                try self.diags.emit(
+                    .err,
+                    .z0030_effect_violation,
+                    span,
+                    "fn '{s}' declared .noasync but inferred .async effect (transitively via a callee)",
+                    .{fd.sig.name},
+                );
+            }
+        }
+    }
+
     /// Round 5 of the effect-inference MVP: user-defined `.custom("X")`
     /// effects with `.nocustom("X")` as the matching denial.
     ///
@@ -1356,6 +1493,81 @@ fn bodyMayPanic(text: []const u8) bool {
                     const pc = text[0];
                     if (pc == ' ' or pc == '\t' or pc == '\n') return true;
                 }
+            }
+        }
+        i += 1;
+    }
+    return false;
+}
+
+/// Heuristic for "this body performs an async / concurrency action": scan
+/// `text` for any of the substrings below, after stripping string / char
+/// literals and `//` line comments. The set targets the explicit Zig++
+/// concurrency surface (`zpp.async_mod.TaskGroup`, `JoinHandle`,
+/// `CancellationToken`, `spawnWithToken`) plus the std-lib threading
+/// primitives (`std.Thread.spawn`, `std.Thread.yield`) and the forward-
+/// compat `std.Io.` prefix from Zig 0.17+. The Zig keywords `await ` and
+/// `suspend ` are also matched — they're reserved for future use, but
+/// flagging them keeps `.noasync` honest if they reappear.
+///
+/// The trailing space on `await ` / `suspend ` is intentional: it's a
+/// poor-man's word-boundary check that prevents `awaitable` /
+/// `suspended` from matching, while still catching the canonical stmt
+/// form `await foo(...);` and `suspend { ... }`.
+fn bodyDoesAsync(text: []const u8) bool {
+    const needles = [_][]const u8{
+        "std.Thread.spawn",
+        "std.Thread.yield",
+        "TaskGroup",
+        "JoinHandle",
+        "spawnWithToken",
+        "CancellationToken",
+        "zpp.async",
+        "async.spawn",
+        ".spawn(",
+        "std.Io.",
+        "await ",
+        "suspend ",
+    };
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = text[i];
+        // Skip over double-quoted string literals.
+        if (c == '"') {
+            i += 1;
+            while (i < text.len) : (i += 1) {
+                if (text[i] == '\\' and i + 1 < text.len) { i += 1; continue; }
+                if (text[i] == '"') { i += 1; break; }
+            }
+            continue;
+        }
+        // Skip over char literals.
+        if (c == '\'') {
+            i += 1;
+            while (i < text.len and text[i] != '\'') : (i += 1) {
+                if (text[i] == '\\' and i + 1 < text.len) i += 1;
+            }
+            if (i < text.len) i += 1;
+            continue;
+        }
+        // Skip over `//` line comments.
+        if (c == '/' and i + 1 < text.len and text[i + 1] == '/') {
+            while (i < text.len and text[i] != '\n') i += 1;
+            continue;
+        }
+        // Try every fixed-string substring at this position. For
+        // identifier-shaped needles (those starting with an identifier
+        // char) require a left word boundary so e.g. `myTaskGroup`
+        // does not match `TaskGroup`. Dot/`.spawn(`-style needles
+        // always start non-ident so the boundary check is a no-op.
+        const left_is_ident = i > 0 and isIdent(text[i - 1]);
+        inline for (needles) |needle| {
+            const ident_start = comptime isIdent(needle[0]);
+            const blocked = ident_start and left_is_ident;
+            if (!blocked and i + needle.len <= text.len and
+                std.mem.eql(u8, text[i .. i + needle.len], needle))
+            {
+                return true;
             }
         }
         i += 1;

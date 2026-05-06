@@ -669,6 +669,10 @@ pub const Parser = struct {
                 .panic
             else if (std.mem.eql(u8, text, "nopanic"))
                 .nopanic
+            else if (std.mem.eql(u8, text, "async"))
+                .@"async"
+            else if (std.mem.eql(u8, text, "noasync"))
+                .noasync
             else if (std.mem.eql(u8, text, "custom"))
                 .custom
             else if (std.mem.eql(u8, text, "nocustom"))
