@@ -294,7 +294,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### CI
 
-* bump actions/configure-pages 5 -&gt; 6 ([719029d](https://github.com/nktkt/zigpp-lang/commit/719029df83e80b27f449818c8c4eb9747ee888bb))
+* bump actions/configure-pages 5 -> 6 ([719029d](https://github.com/nktkt/zigpp-lang/commit/719029df83e80b27f449818c8c4eb9747ee888bb))
 * **deps:** Bump actions/checkout from 4 to 6 ([#1](https://github.com/nktkt/zigpp-lang/issues/1)) ([15b9dc6](https://github.com/nktkt/zigpp-lang/commit/15b9dc669bc5c03941bddcf323435567f328dad5))
 * **deps:** Bump actions/deploy-pages from 4 to 5 ([#2](https://github.com/nktkt/zigpp-lang/issues/2)) ([e237cbd](https://github.com/nktkt/zigpp-lang/commit/e237cbde0fcb0c522a7ec2d2b659b6afcb2f6d47))
 * **deps:** Bump actions/upload-artifact from 4 to 7 ([#3](https://github.com/nktkt/zigpp-lang/issues/3)) ([4d38520](https://github.com/nktkt/zigpp-lang/commit/4d38520c7986a94261f01d23fad942ece42dfa20))
