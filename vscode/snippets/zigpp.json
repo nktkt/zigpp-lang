@@ -76,8 +76,8 @@
   },
   "effects": {
     "prefix": "effects",
-    "body": ["effects(${1|.alloc,.noalloc,.io,.noio,.panic|}$0)"],
-    "description": "Effect annotation (sema-linted)."
+    "body": ["effects(${1|.alloc,.noalloc,.io,.noio,.panic,.nopanic,.async,.noasync|}$0)"],
+    "description": "Effect annotation (sema-linted). For custom effects use the effects_custom snippet."
   },
   "extern interface": {
     "prefix": "externi",
@@ -130,6 +130,25 @@
     "prefix": "effects_pure",
     "body": ["effects(.noalloc, .noio)"],
     "description": "Pure effect annotation: forbids allocation and I/O."
+  },
+  "effects_custom": {
+    "prefix": "effects_custom",
+    "body": ["effects(.custom(\"${1:effect_name}\"))"],
+    "description": "User-defined effect tag; flows through @effectsOf and is checkable via .nocustom(\"X\")."
+  },
+  "effects_of": {
+    "prefix": "effects_of",
+    "body": ["@effectsOf(${1:fn_name})"],
+    "description": "Comptime-query the inferred effect set of a same-file fn (returns []const u8)."
+  },
+  "structural_trait": {
+    "prefix": "structural_trait",
+    "body": [
+      "trait ${1:Name} : structural {",
+      "    fn ${2:method}(self) ${3:void};",
+      "}"
+    ],
+    "description": "Structural trait — satisfied by any type with matching method shapes; no impl block required."
   },
   "pub_trait": {
     "prefix": "pub_trait",
