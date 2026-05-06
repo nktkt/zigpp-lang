@@ -69,7 +69,7 @@ pub fn build(b: *std.Build) void {
         run_step.dependOn(&run_cmd.step);
     }
 
-    const test_step = b.step("test", "Run unit tests for compiler/, lib/, tools/");
+    const test_step = b.step("test", "Run unit tests for compiler/, lib/, tools/, tests/");
     addTestsForTree(b, target, optimize, zpp_module, zpp_compiler_module, "compiler", test_step);
     addTestsForTree(b, target, optimize, zpp_module, zpp_compiler_module, "lib", test_step);
     addTestsForTree(b, target, optimize, zpp_module, zpp_compiler_module, "tools", test_step);
@@ -83,7 +83,7 @@ pub fn build(b: *std.Build) void {
         check_step.dependOn(&check_cmd.step);
     }
 
-    const examples_step = b.step("examples", "Lower and build every .zpp under examples/");
+    const examples_step = b.step("examples", "Lower every .zpp under examples/ to .zig (no execution)");
     if (main_exe) |exe| {
         addExampleSteps(b, exe, examples_step);
     }
