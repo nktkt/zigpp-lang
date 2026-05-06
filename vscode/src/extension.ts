@@ -248,11 +248,116 @@ function registerCommands(context: vscode.ExtensionContext): void {
     }
   );
 
+  // zpp.runActiveFile — spawn `zpp run <activeFilePath>` in a dedicated
+  // integrated terminal so the user gets a real TTY (colored output,
+  // interactive stdin) rather than a passive output-channel stream.
+  const runActiveFileCommand = vscode.commands.registerCommand(
+    'zpp.runActiveFile',
+    () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        void vscode.window.showWarningMessage(
+          'Zig++: no active editor — open a .zpp file first.'
+        );
+        return;
+      }
+      const filePath = editor.document.uri.fsPath;
+      if (!filePath) {
+        void vscode.window.showWarningMessage(
+          'Zig++: the active editor has no file path on disk yet.'
+        );
+        return;
+      }
+      const terminalName = 'Zig++ Run';
+      const existing = vscode.window.terminals.find(
+        (t) => t.name === terminalName
+      );
+      const terminal = existing ?? vscode.window.createTerminal(terminalName);
+      terminal.show(true);
+      // Quote the path so spaces/special chars survive the shell.
+      terminal.sendText(`zpp run "${filePath}"`);
+    }
+  );
+
+  // zpp.explainAtCursor — find the diagnostic whose range contains the
+  // cursor, extract its Z#### code, run `zpp explain <code>`, and surface
+  // the rendered explanation to the user. Unlike the existing
+  // `zigpp.explain` command this one is non-interactive: if there is no
+  // diagnostic under the cursor we just show a friendly information
+  // message instead of prompting for a code.
+  const explainAtCursorCommand = vscode.commands.registerCommand(
+    'zpp.explainAtCursor',
+    () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        void vscode.window.showInformationMessage(
+          'Zig++: no active editor.'
+        );
+        return;
+      }
+      const cursor = editor.selection.active;
+      const diags = vscode.languages.getDiagnostics(editor.document.uri);
+      const hit = diags.find((d) => d.range.contains(cursor));
+      if (!hit) {
+        void vscode.window.showInformationMessage(
+          'Zig++: no diagnostic at the cursor.'
+        );
+        return;
+      }
+      const code =
+        typeof hit.code === 'string'
+          ? hit.code
+          : typeof hit.code === 'object' && hit.code !== null
+            ? String((hit.code as { value: unknown }).value)
+            : undefined;
+      if (!code || !/^Z\d{4}$/i.test(code)) {
+        void vscode.window.showInformationMessage(
+          'Zig++: the diagnostic at the cursor has no Z#### code.'
+        );
+        return;
+      }
+
+      const channel = getOutputChannel();
+      channel.show(true);
+      channel.appendLine(`> zpp explain ${code}`);
+
+      let stdout = '';
+      runZppCommand(
+        'explain',
+        code,
+        (chunk) => {
+          stdout += chunk;
+          channel.append(chunk);
+        },
+        (chunk) => channel.append(chunk),
+        (exitCode) => {
+          if (exitCode !== 0 && exitCode !== null) {
+            channel.appendLine(
+              `\n[zpp explain exited with code ${exitCode}]`
+            );
+            return;
+          }
+          // Show a compact one-shot toast with the first line of the
+          // explanation so the user sees something even if they don't
+          // glance at the output channel.
+          const firstLine = stdout.split(/\r?\n/)[0]?.trim();
+          if (firstLine && firstLine.length > 0) {
+            void vscode.window.showInformationMessage(
+              `Zig++ ${code}: ${firstLine}`
+            );
+          }
+        }
+      );
+    }
+  );
+
   context.subscriptions.push(
     runCommand,
     lowerCommand,
     explainCommand,
-    openDocsCommand
+    openDocsCommand,
+    runActiveFileCommand,
+    explainAtCursorCommand
   );
 }
 
