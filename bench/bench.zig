@@ -31,10 +31,10 @@ pub fn main() !void {
     const w = &stdout_writer.interface;
     defer w.flush() catch {};
 
-    try w.print("# zpp lowering benchmarks\n\n", .{});
+    try w.writeAll("# zpp lowering benchmarks\n\n");
     try w.print("Compiled with mode={s}.\n\n", .{@tagName(@import("builtin").mode)});
-    try w.print("| decls | input bytes | output bytes | iters | total ms | µs / iter | bytes/sec |\n", .{});
-    try w.print("|------:|------------:|-------------:|------:|---------:|----------:|----------:|\n", .{});
+    try w.writeAll("| decls | input bytes | output bytes | iters | total ms | µs / iter | bytes/sec |\n");
+    try w.writeAll("|------:|------------:|-------------:|------:|---------:|----------:|----------:|\n");
 
     for (sizes, 0..) |n, i| {
         const iters = iters_for[i];
@@ -68,7 +68,7 @@ pub fn main() !void {
         );
     }
 
-    try w.print("\n_bytes/sec measured against input size, not output. Lowering output is normally 1.5x–3x larger than input due to vtable / thunk emission._\n", .{});
+    try w.writeAll("\n_bytes/sec measured against input size, not output. Lowering output is normally 1.5x–3x larger than input due to vtable / thunk emission._\n");
 }
 
 /// Build a synthetic source file with `n_decls` top-level declarations.

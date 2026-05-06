@@ -8,11 +8,11 @@
 /// underlying FileWriter when `flush()` runs. We then read the file
 /// back to confirm the bytes actually landed.
 ///
-/// (Note: this example was originally meant to use `zpp.writer.Writer`
-/// from the runtime library, but that module hasn't landed on this
-/// branch yet — only `zpp.trait`, `zpp.owned`, `zpp.contract`,
-/// `zpp.dyn_mod`, `zpp.async_mod`, `zpp.derive`. We instead hand-roll
-/// the same stack to demonstrate the pattern.)
+/// (For the "consume the stdlib trait" counterpart see
+/// `examples/writer_stdlib.zpp`, which uses `zpp.writer.Writer` +
+/// `zpp.writer.BufferedWriter(N)` directly. This file keeps the
+/// hand-rolled version so the trait/impl mechanics are visible without
+/// indirection through the runtime library.)
 ///
 /// Lowered Zig sketch:
 ///     const Writer_VTable = struct {
