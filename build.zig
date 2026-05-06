@@ -70,6 +70,9 @@ pub fn build(b: *std.Build) void {
     }
 
     const test_step = b.step("test", "Run unit tests for compiler/, lib/, tools/, tests/");
+    // The lowering snapshot runner under tests/lowering/snapshots.zig honors
+    // ZPP_UPDATE_SNAPSHOTS: unset (or "0") = compare and fail on drift,
+    // anything else = rewrite. CI must NOT set it. See tests/lowering/README.md.
     addTestsForTree(b, target, optimize, zpp_module, zpp_compiler_module, "compiler", test_step);
     addTestsForTree(b, target, optimize, zpp_module, zpp_compiler_module, "lib", test_step);
     addTestsForTree(b, target, optimize, zpp_module, zpp_compiler_module, "tools", test_step);

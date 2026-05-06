@@ -18,8 +18,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 * **lsp:** code-action auto-fix (Z0010 deinit stub, Z0040 method stubs) ([fb9fca1](https://github.com/nktkt/zigpp-lang/commit/fb9fca1179ffd408df74324e3e9e2b0cb64f2248))
 * **lsp:** WorkspaceEdit auto-fix for Z0010 + Z0040 ([8138606](https://github.com/nktkt/zigpp-lang/commit/81386062a85b5f22e05d11779c9d3dae02e23aa7))
-* **sema:** [@effects](https://github.com/effects)Of surfaces .custom("name") effects ([7a8ab83](https://github.com/nktkt/zigpp-lang/commit/7a8ab83d5fb26bbb39b5f479974b04bea15865e1))
-* **sema:** [@effects](https://github.com/effects)Of surfaces .custom("name") in lowered output ([37fc1d5](https://github.com/nktkt/zigpp-lang/commit/37fc1d5507eca3f4a32ff7c36ed8aac575045704))
+* **sema:** `@effectsOf` surfaces .custom("name") effects ([7a8ab83](https://github.com/nktkt/zigpp-lang/commit/7a8ab83d5fb26bbb39b5f479974b04bea15865e1))
+* **sema:** `@effectsOf` surfaces .custom("name") in lowered output ([37fc1d5](https://github.com/nktkt/zigpp-lang/commit/37fc1d5507eca3f4a32ff7c36ed8aac575045704))
 
 ## [0.1.31](https://github.com/nktkt/zigpp-lang/compare/v0.1.30...v0.1.31) (2026-04-29)
 
@@ -54,7 +54,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Features
 
-* **sema:** [@effects](https://github.com/effects)Of(f) queryable (round 4) ([9182e06](https://github.com/nktkt/zigpp-lang/commit/9182e06a778f15b24191a30379d4658ea98027a7))
+* **sema:** `@effectsOf`(f) queryable (round 4) ([9182e06](https://github.com/nktkt/zigpp-lang/commit/9182e06a778f15b24191a30379d4658ea98027a7))
 
 ## [0.1.26](https://github.com/nktkt/zigpp-lang/compare/v0.1.25...v0.1.26) (2026-04-29)
 
