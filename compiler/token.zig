@@ -95,7 +95,6 @@ pub const TokenKind = enum {
     // New Zig++ keywords
     kw_trait,
     kw_impl,
-    kw_for_kw, // intentionally unused; alias of kw_for
     kw_dyn,
     kw_using,
     kw_owned,

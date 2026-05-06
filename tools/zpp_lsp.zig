@@ -201,8 +201,12 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
     const params = obj.get("params");
 
     if (std.mem.eql(u8, method, "initialize")) {
+        // `codeLensProvider.resolveProvider:false` means we hand back fully
+        // resolved lenses up front — clients don't need to round-trip a
+        // `codeLens/resolve` for the title. Our lenses are derived from the
+        // already-cached parse, so eager resolution is cheap.
         const caps =
-            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"typeDefinitionProvider":true,"referencesProvider":true,"workspaceSymbolProvider":true,"renameProvider":{"prepareProvider":true},"completionProvider":{"triggerCharacters":[".",":"]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false},"codeActionProvider":{"codeActionKinds":["quickfix"]},"semanticTokensProvider":{"legend":{"tokenTypes":["keyword","string","number","comment","function","interface","struct","variable"],"tokenModifiers":["declaration"]},"full":{"delta":true},"range":true},"inlayHintProvider":true,"foldingRangeProvider":true},"serverInfo":{"name":"zpp-lsp","version":"0.11.0"}}
+            \\{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true,"hoverProvider":true,"documentSymbolProvider":true,"definitionProvider":true,"typeDefinitionProvider":true,"referencesProvider":true,"workspaceSymbolProvider":true,"renameProvider":{"prepareProvider":true},"completionProvider":{"triggerCharacters":[".",":"]},"signatureHelpProvider":{"triggerCharacters":["(",","]},"diagnosticProvider":{"interFileDependencies":false,"workspaceDiagnostics":false},"codeActionProvider":{"codeActionKinds":["quickfix"]},"codeLensProvider":{"resolveProvider":false},"semanticTokensProvider":{"legend":{"tokenTypes":["keyword","string","number","comment","function","interface","struct","variable"],"tokenModifiers":["declaration"]},"full":{"delta":true},"range":true},"inlayHintProvider":true,"foldingRangeProvider":true},"serverInfo":{"name":"zpp-lsp","version":"0.12.0"}}
         ;
         try writeResult(server.allocator, id_text, caps);
         return;
@@ -278,6 +282,10 @@ fn handleMessage(server: *Server, raw: []const u8) !void {
     }
     if (std.mem.eql(u8, method, "textDocument/codeAction")) {
         try onCodeAction(server, id_text, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/codeLens")) {
+        try onCodeLens(server, id_text, params);
         return;
     }
     if (std.mem.eql(u8, method, "textDocument/semanticTokens/full")) {
@@ -2278,6 +2286,266 @@ fn renderCodeActions(allocator: std.mem.Allocator, actions: []const CodeActionDi
     }
     try out.append(allocator, ']');
     return out.toOwnedSlice(allocator);
+}
+
+/// `textDocument/codeLens` handler. Walks the cached doc text and emits one
+/// lens per matching top-level construct:
+///   - effects-annotated fns        -> declared vs inferred effect set
+///   - structs/owned-structs with `derive(.{ ... })` -> derived-method count
+///   - `owned struct ...`           -> deinit-shape verification status
+///
+/// Lenses are fully resolved at query time (no `codeLens/resolve` round-trip
+/// — see `resolveProvider:false` in `initialize`). The click target is a
+/// no-op `zpp.lens.info` command; the title carries the only signal a user
+/// needs to read.
+fn onCodeLens(server: *Server, id_text: []const u8, params: ?std.json.Value) !void {
+    const allocator = server.allocator;
+    const p = params orelse return writeResult(allocator, id_text, "[]");
+    if (p != .object) return writeResult(allocator, id_text, "[]");
+    const td = p.object.get("textDocument") orelse return writeResult(allocator, id_text, "[]");
+    if (td != .object) return writeResult(allocator, id_text, "[]");
+    const uri_v = td.object.get("uri") orelse return writeResult(allocator, id_text, "[]");
+    if (uri_v != .string) return writeResult(allocator, id_text, "[]");
+
+    const text = server.docs.get(uri_v.string) orelse {
+        try writeResult(allocator, id_text, "[]");
+        return;
+    };
+
+    const result = buildCodeLenses(allocator, text) catch {
+        try writeResult(allocator, id_text, "[]");
+        return;
+    };
+    defer allocator.free(result);
+    try writeResult(allocator, id_text, result);
+}
+
+/// Build the `result` JSON array (as an owned slice) for a codeLens response
+/// over `source`. Returns "[]" on parse/sema failure rather than erroring —
+/// partial syntax mid-edit is the common case in an LSP.
+///
+/// We run a fresh parse + sema so the inferred-effects table is available
+/// for the effect lens (compared against the declared annotation). Both the
+/// AST arena and the SemaResult are kept alive for the entire build because
+/// the maps store slices that point into the AST source / arena.
+fn buildCodeLenses(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    var diags = compiler.Diagnostics.init(allocator);
+    defer diags.deinit();
+    var arena = compiler.ast.Arena.init(allocator);
+    defer arena.deinit();
+
+    const file = compiler.parseSource(allocator, source, &arena, &diags) catch {
+        return try allocator.dupe(u8, "[]");
+    };
+
+    // Sema is best-effort: if it fails (e.g. malformed user code) we still
+    // emit derive/owned lenses; the effect lens just falls back to the
+    // declared set without an inference comparison.
+    var sema_engine = compiler.sema.Sema.init(allocator, &diags);
+    var sema_result_opt: ?compiler.sema.SemaResult = sema_engine.analyze(&file) catch null;
+    defer if (sema_result_opt) |*r| r.deinit();
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    try out.append(allocator, '[');
+    var first = true;
+
+    for (file.decls) |decl| {
+        switch (decl) {
+            .fn_decl => |fd| {
+                if (fd.sig.effects) |ef| {
+                    const inferred_opt: ?compiler.sema.InferredEffects =
+                        if (sema_result_opt) |r| r.inferred_effects.get(fd.sig.name) else null;
+                    try appendEffectLens(allocator, &out, &first, source, fd.sig.span, ef, inferred_opt);
+                }
+            },
+            .struct_decl => |sd| {
+                if (sd.derive) |dv| {
+                    try appendDeriveLens(allocator, &out, &first, source, sd.span, dv);
+                }
+            },
+            .owned_struct => |os| {
+                if (os.derive) |dv| {
+                    try appendDeriveLens(allocator, &out, &first, source, os.span, dv);
+                }
+                try appendOwnedDeinitLens(allocator, &out, &first, source, os);
+            },
+            else => {},
+        }
+    }
+
+    try out.append(allocator, ']');
+    return out.toOwnedSlice(allocator);
+}
+
+/// Lens range covers the keyword line of the decl (start.line == decl line,
+/// chars 0..1). VS Code only uses `range.start.line` to pick the gutter row,
+/// so a one-character end suffices and keeps the JSON minimal.
+fn lensLineRange(source: []const u8, span: compiler.diagnostics.Span) LspRange {
+    const start = compiler.locate(source, span.start);
+    return .{
+        .start_line = start.line - 1,
+        .start_col = 0,
+        .end_line = start.line - 1,
+        .end_col = 1,
+    };
+}
+
+/// Append a single CodeLens object to `out`. Title is the human-readable
+/// label; command is left as a no-op `zpp.lens.info` so editors render the
+/// title as a non-interactive label (clicking it does nothing).
+fn appendCodeLens(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    first: *bool,
+    range: LspRange,
+    title: []const u8,
+) !void {
+    if (!first.*) try out.append(allocator, ',');
+    first.* = false;
+    try out.append(allocator, '{');
+    try out.appendSlice(allocator, "\"range\":");
+    try appendRangeJson(out, allocator, range);
+    const title_json = try jsonStringify(allocator, title);
+    defer allocator.free(title_json);
+    try out.appendSlice(allocator, ",\"command\":{\"title\":");
+    try out.appendSlice(allocator, title_json);
+    try out.appendSlice(allocator, ",\"command\":\"zpp.lens.info\",\"arguments\":[]}");
+    try out.append(allocator, '}');
+}
+
+/// Format the declared-effect list as a comma-separated string with leading
+/// dots (e.g. `.noalloc, .io`). Custom names render as `.custom("X")`.
+fn formatDeclaredEffects(allocator: std.mem.Allocator, ef: compiler.ast.EffectsAttr) ![]u8 {
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(allocator);
+    var first = true;
+    for (ef.effects) |e| {
+        if (!first) try buf.appendSlice(allocator, ", ");
+        first = false;
+        try buf.append(allocator, '.');
+        try buf.appendSlice(allocator, e.text);
+        if (e.name.len != 0) {
+            try buf.append(allocator, '(');
+            try buf.append(allocator, '"');
+            try buf.appendSlice(allocator, e.name);
+            try buf.append(allocator, '"');
+            try buf.append(allocator, ')');
+        }
+    }
+    return buf.toOwnedSlice(allocator);
+}
+
+/// Format the inferred-effects bitset as `{alloc, io}` style. Pure fns
+/// render as `{}`. Custom names are not surfaced here — the lens compares
+/// against the declared `.no*` axes only, which matches what Z0030 fires on.
+fn formatInferredEffects(allocator: std.mem.Allocator, inf: compiler.sema.InferredEffects) ![]u8 {
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(allocator);
+    try buf.append(allocator, '{');
+    var first = true;
+    if (inf.alloc) {
+        try buf.appendSlice(allocator, "alloc");
+        first = false;
+    }
+    if (inf.io) {
+        if (!first) try buf.appendSlice(allocator, ", ");
+        try buf.appendSlice(allocator, "io");
+        first = false;
+    }
+    if (inf.panic) {
+        if (!first) try buf.appendSlice(allocator, ", ");
+        try buf.appendSlice(allocator, "panic");
+        first = false;
+    }
+    try buf.append(allocator, '}');
+    return buf.toOwnedSlice(allocator);
+}
+
+/// True iff the inferred set violates any declared `.no*` axis. Mirrors the
+/// Z0030 trigger condition in `sema.checkEffectInference` and friends.
+fn declaredViolatesInferred(ef: compiler.ast.EffectsAttr, inf: compiler.sema.InferredEffects) bool {
+    for (ef.effects) |e| {
+        switch (e.kind) {
+            .noalloc => if (inf.alloc) return true,
+            .noio => if (inf.io) return true,
+            .nopanic => if (inf.panic) return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+fn appendEffectLens(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    first: *bool,
+    source: []const u8,
+    sig_span: compiler.diagnostics.Span,
+    ef: compiler.ast.EffectsAttr,
+    inferred_opt: ?compiler.sema.InferredEffects,
+) !void {
+    const declared = try formatDeclaredEffects(allocator, ef);
+    defer allocator.free(declared);
+
+    const title = if (inferred_opt) |inf| blk: {
+        const inferred = try formatInferredEffects(allocator, inf);
+        defer allocator.free(inferred);
+        const status = if (declaredViolatesInferred(ef, inf)) " Z0030" else " OK";
+        break :blk try std.fmt.allocPrint(
+            allocator,
+            "effects: declared {s} / inferred {s}{s}",
+            .{ declared, inferred, status },
+        );
+    } else try std.fmt.allocPrint(allocator, "effects: declared {s}", .{declared});
+    defer allocator.free(title);
+
+    try appendCodeLens(out, allocator, first, lensLineRange(source, sig_span), title);
+}
+
+fn appendDeriveLens(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    first: *bool,
+    source: []const u8,
+    decl_span: compiler.diagnostics.Span,
+    dv: compiler.ast.DeriveAttr,
+) !void {
+    var names_buf = std.ArrayList(u8){};
+    defer names_buf.deinit(allocator);
+    for (dv.names, 0..) |n, i| {
+        if (i != 0) try names_buf.appendSlice(allocator, ", ");
+        try names_buf.appendSlice(allocator, n);
+    }
+    const title = try std.fmt.allocPrint(
+        allocator,
+        "derive: +{d} methods ({s})",
+        .{ dv.names.len, names_buf.items },
+    );
+    defer allocator.free(title);
+    try appendCodeLens(out, allocator, first, lensLineRange(source, decl_span), title);
+}
+
+fn appendOwnedDeinitLens(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    first: *bool,
+    source: []const u8,
+    os: compiler.ast.OwnedStructDecl,
+) !void {
+    var has_deinit = false;
+    for (os.fns) |f| {
+        if (std.mem.eql(u8, f.sig.name, "deinit")) {
+            has_deinit = true;
+            break;
+        }
+    }
+    const title = if (has_deinit)
+        try allocator.dupe(u8, "owned: deinit OK")
+    else
+        try allocator.dupe(u8, "owned: deinit MISSING (Z0010)");
+    defer allocator.free(title);
+    try appendCodeLens(out, allocator, first, lensLineRange(source, os.span), title);
 }
 
 /// LSP semantic-tokens type indices. Order MUST match the legend advertised
@@ -4340,4 +4608,84 @@ test "buildFoldingRanges returns [] on empty source" {
     const out = try buildFoldingRanges(a, "");
     defer a.free(out);
     try std.testing.expectEqualStrings("[]", out);
+}
+
+test "buildCodeLenses emits effect / derive / owned-deinit lenses" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn pure(x: u32) u32 effects(.noalloc) { return x + 1; }
+        \\struct Counter {
+        \\    n: usize,
+        \\    pub fn bump(self: *Counter) void { self.n += 1; }
+        \\} derive(.{ Hash, Eq, Debug });
+        \\owned struct Box {
+        \\    n: usize,
+        \\    pub fn deinit(self: *Box) void { _ = self; }
+        \\}
+    ;
+    const out = try buildCodeLenses(a, src);
+    defer a.free(out);
+
+    // Three lenses, three command objects.
+    var lens_count: usize = 0;
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, out, idx, "\"command\":{")) |pos| {
+        lens_count += 1;
+        idx = pos + 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), lens_count);
+
+    // Effect lens shows the declared `.noalloc` axis and a clean inferred set.
+    try std.testing.expect(std.mem.indexOf(u8, out, "effects: declared .noalloc / inferred {} OK") != null);
+    // Derive lens reports the requested method count and names.
+    try std.testing.expect(std.mem.indexOf(u8, out, "derive: +3 methods (Hash, Eq, Debug)") != null);
+    // Owned-deinit lens flags the deinit shape as present.
+    try std.testing.expect(std.mem.indexOf(u8, out, "owned: deinit OK") != null);
+    // Click target is the no-op `zpp.lens.info` command.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"command\":\"zpp.lens.info\"") != null);
+}
+
+test "buildCodeLenses flags missing deinit on owned struct" {
+    const a = std.testing.allocator;
+    const src =
+        \\owned struct Leaky {
+        \\    n: usize,
+        \\}
+    ;
+    const out = try buildCodeLenses(a, src);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "owned: deinit MISSING (Z0010)") != null);
+}
+
+test "buildCodeLenses returns [] when no matching constructs" {
+    const a = std.testing.allocator;
+    // No effects(...), no derive(...), no owned struct -> no lenses.
+    const src = "fn helper(x: usize) usize { return x + 1; }\n";
+    const out = try buildCodeLenses(a, src);
+    defer a.free(out);
+    try std.testing.expectEqualStrings("[]", out);
+}
+
+test "buildCodeLenses returns [] on empty source" {
+    const a = std.testing.allocator;
+    const out = try buildCodeLenses(a, "");
+    defer a.free(out);
+    try std.testing.expectEqualStrings("[]", out);
+}
+
+test "buildCodeLenses range pins to decl line" {
+    const a = std.testing.allocator;
+    // The `owned struct` keyword is on line 2 (0-indexed). The lens range
+    // must start there with character 0.
+    const src =
+        \\// header comment
+        \\
+        \\owned struct Box {
+        \\    n: usize,
+        \\    pub fn deinit(self: *Box) void { _ = self; }
+        \\}
+    ;
+    const out = try buildCodeLenses(a, src);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"start\":{\"line\":2,\"character\":0}") != null);
 }
