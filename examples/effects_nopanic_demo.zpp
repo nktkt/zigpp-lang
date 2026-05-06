@@ -1,0 +1,86 @@
+/// effects_nopanic_demo.zpp — `effects(.nopanic)` enforcement.
+///
+/// Teaches: declaring a function `effects(.nopanic)` is a contract that
+/// the body never reaches a panic site. Sema's panic-inference pass scans
+/// the body text for known panic seeds (`@panic(`, `std.debug.assert(`,
+/// `std.debug.panic(`, `unreachable`, ...) and also tracks transitive
+/// callees: if any callee is `.panic`, the caller inherits it. A
+/// `.nopanic` declaration that contradicts the inferred set is rejected
+/// at sema time with Z0030.
+///
+/// (Note: this example originally targeted `.noasync` enforcement, but
+/// that effect kind is not on this branch — only `.nopanic`, `.noalloc`,
+/// `.noio` and `custom`/`nocustom` are available. We use `.nopanic` to
+/// demonstrate the same shape.)
+///
+/// Lowered Zig sketch:
+///     // Effect annotations are erased post-sema; the body lowers to
+///     // a regular Zig fn. Sema only used the annotation to gate the
+///     // inferred-effects check above.
+///     fn fib(n: u32) u64 { ... iterative, no panics, no asserts ... }
+///     fn fnv1a(bytes: []const u8) u64 { ... no panics ... }
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+// Pure compute: iterative Fibonacci. No allocator, no IO, no panics.
+// Using `*%` and `+%` keeps overflow well-defined so the body has no
+// implicit unreachable on overflow; sema's panic pass infers `{}`.
+fn fib(n: u32) u64 effects(.nopanic, .noalloc, .noio) {
+    var a: u64 = 0;
+    var b: u64 = 1;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const next = a +% b;
+        a = b;
+        b = next;
+    }
+    return a;
+}
+
+// Another pure compute: FNV-1a hash. Branch-free body, no panics.
+fn fnv1a64(bytes: []const u8) u64 effects(.nopanic, .noalloc, .noio) {
+    var h: u64 = 0xcbf29ce484222325;
+    for (bytes) |x| {
+        h ^= x;
+        h *%= 0x100000001b3;
+    }
+    return h;
+}
+
+pub fn main() !void {
+    // Drive the .nopanic fns. Both pass inference because their bodies
+    // contain no `@panic`, no `assert`, no `unreachable`, no `catch
+    // unreachable`, and no calls into a `.panic` callee.
+    var i: u32 = 0;
+    while (i < 12) : (i += 1) {
+        std.debug.print("fib({d:>2}) = {d}\n", .{ i, fib(i) });
+    }
+
+    const msg = "the quick brown fox";
+    std.debug.print("fnv1a64(\"{s}\") = {x}\n", .{ msg, fnv1a64(msg) });
+
+    std.debug.print("(both fib and fnv1a64 declared .nopanic; sema's panic-inference pass agreed)\n", .{});
+
+    // ----------------------------------------------------------------
+    // Z0030 — uncomment to see the panic-inference check fire:
+    //
+    //     fn lying(n: u32) u64 effects(.nopanic) {
+    //         std.debug.assert(n < 1000); // <-- known panic seed
+    //         return @as(u64, n) *% 31;
+    //     }
+    //
+    // The body contains `std.debug.assert(`, so the panic pass infers
+    // `.panic`; the `.nopanic` annotation contradicts it and sema emits
+    //   error: Z0030 fn 'lying' declared .nopanic but inferred .panic effect
+    //
+    // Likewise, calling a `.panic` callee transitively:
+    //
+    //     fn lying2() void effects(.nopanic) {
+    //         lying(10); // transitively .panic via the callee
+    //     }
+    //
+    //   error: Z0030 fn 'lying2' declared .nopanic but inferred .panic
+    //          effect (transitively via a callee)
+    // ----------------------------------------------------------------
+}

@@ -1,0 +1,15 @@
+trait Greeter {
+    fn name(self) []const u8;
+    fn greet(self) []const u8 {
+        return "hello from default";
+    }
+}
+
+const Hello = struct {};
+
+impl Greeter for Hello {
+    fn name(self) []const u8 {
+        _ = self;
+        return "Hello";
+    }
+}
