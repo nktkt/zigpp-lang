@@ -27,7 +27,7 @@ ZPP_FUZZ_ITERS=1000 zig build fuzz   # ファザー実行 (opt-in)
 | `compiler/`    | `.zpp` → `.zig` フロントエンド (token, ast, parser, sema, lower, diagnostics) |
 | `lib/`         | `zpp` ランタイム: `Dyn`, `Owned`, contracts, derive    |
 | `tools/`       | `zpp` CLI + `fmt`, `lsp`, `doc`, `migrate`             |
-| `examples/`    | 8 個の `.zpp` プログラム (各構文要素を網羅)            |
+| `examples/`    | 15+ 個の `.zpp` プログラムと multi-file / build.zpp / CLI プロジェクト |
 | `tests/`       | compile / diagnostic / snapshot / behavior / no-hidden-alloc / fuzz |
 | `vscode/`      | VS Code 拡張 (TextMate grammar + LSP client)           |
 

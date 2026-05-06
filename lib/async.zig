@@ -59,6 +59,10 @@ pub fn JoinHandle(comptime T: type) type {
         err: ?anyerror = null,
         state: std.atomic.Value(u8) = .{ .raw = @intFromEnum(TaskState.pending) },
         joined: bool = false,
+        // When `true`, the handle was synthesised for a `spawn()` call on
+        // an already-cancelled group; no OS thread was started, so
+        // `wait()` must NOT call `thread.join()`.
+        thread_started: bool = true,
         closure: *anyopaque,
         closure_drop: *const fn (Allocator, *anyopaque) void,
 
@@ -78,7 +82,7 @@ pub fn JoinHandle(comptime T: type) type {
         /// Block until the task finishes. Idempotent.
         pub fn wait(self: *Self) void {
             if (self.joined) return;
-            self.thread.join();
+            if (self.thread_started) self.thread.join();
             self.joined = true;
         }
 
@@ -141,6 +145,14 @@ pub const TaskGroup = struct {
         const Handle = JoinHandle(Payload);
         const Args = @TypeOf(args);
         const ret_is_error_union = @typeInfo(@typeInfo(F).@"fn".return_type orelse void) == .error_union;
+
+        // Stance: if the group is already cancelled, do NOT start a new
+        // thread. Return a synthesised handle whose state is `.cancelled`
+        // so callers see a uniform JoinHandle API and `join()` reports
+        // `error.Cancelled` for it like any other cancelled task.
+        if (self.cancel_token.isCancelled()) {
+            return self.makeCancelledHandle(Handle);
+        }
 
         const Closure = struct {
             args: Args,
@@ -224,12 +236,123 @@ pub const TaskGroup = struct {
         return handle;
     }
 
+    /// Flip the group's `CancellationToken` to cancelled. Cooperative
+    /// tasks that poll their token observe it on the next check;
+    /// subsequent `spawn`/`spawnWithToken` calls return a synthesised
+    /// handle in the `.cancelled` state without starting a thread.
+    /// Idempotent.
     pub fn cancel(self: *TaskGroup) void {
         self.cancel_token.cancel();
     }
 
     pub fn token(self: *TaskGroup) *CancellationToken {
         return &self.cancel_token;
+    }
+
+    /// Like `spawn`, but the spawned function's signature is
+    /// `fn(token: *CancellationToken, ...args) -> R`: the group's shared
+    /// token is passed as the first argument so the task body can poll
+    /// `token.isCancelled()` / `token.throwIfCancelled()` without the
+    /// caller having to thread the token through a context struct.
+    /// `args` here is the *tail* of the argument tuple (everything after
+    /// the token).
+    pub fn spawnWithToken(self: *TaskGroup, comptime f: anytype, args: anytype) !*JoinHandle(ReturnPayload(@TypeOf(f))) {
+        // Build a tuple `(token, args...)` at comptime. The fields of
+        // `std.builtin.Type.StructField` are comptime-only, so the field
+        // array itself has to live in a comptime block.
+        const FullArgs = comptime blk: {
+            const TailArgs = @TypeOf(args);
+            const tail_info = @typeInfo(TailArgs).@"struct";
+            var fields: [tail_info.fields.len + 1]std.builtin.Type.StructField = undefined;
+            fields[0] = .{
+                .name = "0",
+                .type = *CancellationToken,
+                .default_value_ptr = null,
+                .is_comptime = false,
+                .alignment = @alignOf(*CancellationToken),
+            };
+            for (tail_info.fields, 0..) |field, i| {
+                fields[i + 1] = .{
+                    .name = std.fmt.comptimePrint("{d}", .{i + 1}),
+                    .type = field.type,
+                    .default_value_ptr = null,
+                    .is_comptime = false,
+                    .alignment = @alignOf(field.type),
+                };
+            }
+            break :blk @Type(.{ .@"struct" = .{
+                .layout = .auto,
+                .fields = &fields,
+                .decls = &.{},
+                .is_tuple = true,
+            } });
+        };
+        var full: FullArgs = undefined;
+        full[0] = self.token();
+        const TailArgs = @TypeOf(args);
+        const tail_info = @typeInfo(TailArgs).@"struct";
+        inline for (tail_info.fields, 0..) |field, i| {
+            @field(full, std.fmt.comptimePrint("{d}", .{i + 1})) = @field(args, field.name);
+        }
+        return self.spawn(f, full);
+    }
+
+    /// Build a `*JoinHandle(Payload)` that is already in the
+    /// `.cancelled` state. Used when `spawn` is called on an
+    /// already-cancelled group: we want the returned handle to behave
+    /// like a normal cancelled task without paying for an OS thread.
+    fn makeCancelledHandle(self: *TaskGroup, comptime Handle: type) !*Handle {
+        // Empty closure satisfies the `closure`/`closure_drop` invariant
+        // — `wait()` is gated by `thread_started`, so the worker code
+        // path that would touch a real closure never runs.
+        const Empty = struct {
+            fn drop(allocator: Allocator, p: *anyopaque) void {
+                const c: *@This() = @ptrCast(@alignCast(p));
+                allocator.destroy(c);
+            }
+        };
+        const empty = try self.allocator.create(Empty);
+        errdefer self.allocator.destroy(empty);
+
+        const handle = try self.allocator.create(Handle);
+        errdefer self.allocator.destroy(handle);
+
+        handle.* = .{
+            .allocator = self.allocator,
+            .thread = undefined,
+            .thread_started = false,
+            .closure = @ptrCast(empty),
+            .closure_drop = Empty.drop,
+            .joined = true,
+        };
+        handle.state.store(@intFromEnum(TaskState.cancelled), .release);
+
+        const Erased = struct {
+            fn waitFn(p: *anyopaque) void {
+                const h: *Handle = @ptrCast(@alignCast(p));
+                h.wait();
+            }
+            fn errFn(p: *anyopaque) ?anyerror {
+                const h: *Handle = @ptrCast(@alignCast(p));
+                return switch (h.currentState()) {
+                    .failed => h.err orelse error.TaskFailed,
+                    .cancelled => error.Cancelled,
+                    else => null,
+                };
+            }
+            fn destroyFn(p: *anyopaque) void {
+                const h: *Handle = @ptrCast(@alignCast(p));
+                h.destroy();
+            }
+        };
+
+        try self.tasks.append(self.allocator, .{
+            .handle = @ptrCast(handle),
+            .wait_fn = Erased.waitFn,
+            .err_fn = Erased.errFn,
+            .destroy_fn = Erased.destroyFn,
+        });
+        return handle;
     }
 
     /// Wait for every spawned task to finish. If any task fails, the
@@ -240,16 +363,52 @@ pub const TaskGroup = struct {
         if (self.joined) return;
         self.joined = true;
 
+        // First-error auto-cancel: a tiny watchdog thread polls every
+        // handle's non-blocking err_fn and flips the group token as soon
+        // as ANY task reports an error, regardless of where that task
+        // sits in spawn order. Without this, a failing task that comes
+        // after a long-running cooperative task in `tasks.items` would
+        // not cancel its sibling until after the wait_fn loop reached
+        // the failed handle — which never happens if the long-running
+        // task waits on cancellation. The main thread still waits on
+        // every handle below so every worker thread is reaped before
+        // `join` returns.
+        var watchdog_done = std.atomic.Value(bool).init(false);
+        const Watchdog = struct {
+            fn run(g: *TaskGroup, done: *std.atomic.Value(bool)) void {
+                while (!done.load(.acquire)) {
+                    for (g.tasks.items) |t| {
+                        if (t.err_fn(t.handle)) |_| {
+                            g.cancel_token.cancel();
+                            return;
+                        }
+                    }
+                    std.Thread.yield() catch {};
+                }
+            }
+        };
+        const watchdog = std.Thread.spawn(.{}, Watchdog.run, .{ self, &watchdog_done }) catch null;
+
+        // Pick the most informative error: a real failure beats a
+        // `Cancelled` (cancellation is usually a *symptom* of another
+        // task's failure or an explicit `group.cancel()`, so propagating
+        // the underlying error tells the caller more).
         var first_err: ?anyerror = null;
         for (self.tasks.items) |t| {
             t.wait_fn(t.handle);
-            if (first_err == null) {
-                if (t.err_fn(t.handle)) |e| {
+            if (t.err_fn(t.handle)) |e| {
+                if (first_err == null or (first_err.? == error.Cancelled and e != error.Cancelled)) {
                     first_err = e;
-                    self.cancel_token.cancel();
                 }
+                self.cancel_token.cancel();
             }
         }
+
+        if (watchdog) |w| {
+            watchdog_done.store(true, .release);
+            w.join();
+        }
+
         if (first_err) |e| return e;
     }
 
@@ -354,4 +513,132 @@ test "CancellationToken is observable across spawn" {
     tok.cancel();
     try std.testing.expect(tok.isCancelled());
     try std.testing.expectError(error.Cancelled, tok.throwIfCancelled());
+}
+
+// -- cancellation propagation tests -----------------------------------
+
+const CoopCtx = struct {
+    tok: *CancellationToken,
+    observed_cancel: *std.atomic.Value(bool),
+    iters: u32,
+};
+
+fn coopWorker(ctx: *CoopCtx) error{Cancelled}!void {
+    var i: u32 = 0;
+    while (i < ctx.iters) : (i += 1) {
+        if (ctx.tok.isCancelled()) {
+            ctx.observed_cancel.store(true, .release);
+            return error.Cancelled;
+        }
+        std.Thread.yield() catch {};
+    }
+}
+
+fn workerWithToken(tok: *CancellationToken, observed: *std.atomic.Value(bool)) error{Cancelled}!void {
+    var i: u32 = 0;
+    while (i < 1_000_000) : (i += 1) {
+        if (tok.isCancelled()) {
+            observed.store(true, .release);
+            return error.Cancelled;
+        }
+        std.Thread.yield() catch {};
+    }
+}
+
+const FailCtx = struct {
+    tok: *CancellationToken,
+    observed_cancel: *std.atomic.Value(bool),
+};
+
+fn failingFn() error{Boom}!void {
+    return error.Boom;
+}
+
+fn longCoopFn(ctx: *FailCtx) error{Cancelled}!void {
+    var i: u32 = 0;
+    // Loop until cancellation is observed (or a generous safety cap to
+    // keep a buggy implementation from hanging forever).
+    while (i < 5_000_000) : (i += 1) {
+        if (ctx.tok.isCancelled()) {
+            ctx.observed_cancel.store(true, .release);
+            return error.Cancelled;
+        }
+        std.Thread.yield() catch {};
+    }
+}
+
+test "TaskGroup.cancel from main thread terminates cooperative tasks before join returns" {
+    var group = TaskGroup.init(std.testing.allocator);
+    defer group.deinit();
+
+    var observed_a = std.atomic.Value(bool).init(false);
+    var observed_b = std.atomic.Value(bool).init(false);
+    var observed_c = std.atomic.Value(bool).init(false);
+    var ctx_a = CoopCtx{ .tok = group.token(), .observed_cancel = &observed_a, .iters = 5_000_000 };
+    var ctx_b = CoopCtx{ .tok = group.token(), .observed_cancel = &observed_b, .iters = 5_000_000 };
+    var ctx_c = CoopCtx{ .tok = group.token(), .observed_cancel = &observed_c, .iters = 5_000_000 };
+
+    _ = try group.spawn(coopWorker, .{&ctx_a});
+    _ = try group.spawn(coopWorker, .{&ctx_b});
+    _ = try group.spawn(coopWorker, .{&ctx_c});
+
+    // Give the workers a brief moment to start spinning so we know cancel
+    // is what stops them, not a never-started thread.
+    std.Thread.yield() catch {};
+    group.cancel();
+
+    try std.testing.expectError(error.Cancelled, group.join());
+    try std.testing.expect(observed_a.load(.acquire));
+    try std.testing.expect(observed_b.load(.acquire));
+    try std.testing.expect(observed_c.load(.acquire));
+}
+
+test "TaskGroup first-error auto-cancel propagates to siblings via shared token" {
+    var group = TaskGroup.init(std.testing.allocator);
+    defer group.deinit();
+
+    var observed_a = std.atomic.Value(bool).init(false);
+    var observed_b = std.atomic.Value(bool).init(false);
+    var ctx_a = FailCtx{ .tok = group.token(), .observed_cancel = &observed_a };
+    var ctx_b = FailCtx{ .tok = group.token(), .observed_cancel = &observed_b };
+
+    _ = try group.spawn(longCoopFn, .{&ctx_a});
+    _ = try group.spawn(longCoopFn, .{&ctx_b});
+    _ = try group.spawn(failingFn, .{});
+
+    // The first failing handle that `join` reaches flips the token; the
+    // long-running coop tasks should pick it up on their next iteration.
+    try std.testing.expectError(error.Boom, group.join());
+    try std.testing.expect(group.token().isCancelled());
+    try std.testing.expect(observed_a.load(.acquire));
+    try std.testing.expect(observed_b.load(.acquire));
+}
+
+test "TaskGroup.spawnWithToken passes the group token as the first arg" {
+    var group = TaskGroup.init(std.testing.allocator);
+    defer group.deinit();
+
+    var observed = std.atomic.Value(bool).init(false);
+    _ = try group.spawnWithToken(workerWithToken, .{&observed});
+    std.Thread.yield() catch {};
+    group.cancel();
+    try std.testing.expectError(error.Cancelled, group.join());
+    try std.testing.expect(observed.load(.acquire));
+}
+
+test "TaskGroup.spawn on an already-cancelled group returns a cancelled handle without starting a thread" {
+    var group = TaskGroup.init(std.testing.allocator);
+    defer group.deinit();
+
+    group.cancel();
+    var counter = std.atomic.Value(u32).init(0);
+    var ctx = TestCtx{ .counter = &counter, .bump_by = 1 };
+    const h = try group.spawn(bumpFn, .{&ctx});
+    // No thread ran, so the counter is untouched and the handle is in
+    // the cancelled state.
+    try std.testing.expectEqual(TaskState.cancelled, h.currentState());
+    try std.testing.expectEqual(@as(u32, 0), counter.load(.acquire));
+    try std.testing.expectError(error.Cancelled, h.join());
+    // group.join() reports the first error (which here is Cancelled).
+    try std.testing.expectError(error.Cancelled, group.join());
 }

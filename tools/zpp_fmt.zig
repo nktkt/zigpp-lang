@@ -6,7 +6,7 @@ pub const FormatOptions = struct {
 
 const indent_unit: []const u8 = "    ";
 
-/// Recognised Zig++ keywords that should always be followed by a space.
+/// Recognized Zig++ keywords that should always be followed by a space.
 const zpp_keywords = [_][]const u8{
     "trait",      "impl",     "dyn",       "using",
     "owned",      "own",      "move",      "where",
@@ -341,7 +341,7 @@ pub fn main() !void {
         if (std.mem.eql(u8, a, "--check")) {
             opts.check_only = true;
         } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
-            try emitError("zpp-fmt [--check] [paths...]\n", .{});
+            try emitError("zpp fmt [--check] [paths...]\n", .{});
             return;
         } else {
             try paths.append(allocator, a);

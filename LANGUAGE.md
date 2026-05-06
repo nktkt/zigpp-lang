@@ -1,4 +1,4 @@
-# Zig++ Language Sketch (v0.1 draft)
+# Zig++ Language Sketch (v0.2 draft)
 
 This document is a working sketch, not a normative specification. It defines
 the new constructs Zig++ adds on top of Zig 0.16 and how each lowers to Zig.
@@ -28,6 +28,10 @@ A trait alone has no runtime representation. Lowering produces a `_VTable`
 struct type whose fields are function pointers taking `*anyopaque` as the
 first argument.
 
+Method arity is `0..16` parameters (counting `self`). Signatures over 16
+parameters emit Z0001. The earlier 5-parameter ceiling has been lifted in
+v0.2.
+
 ```zigpp
 trait Writer {
     fn write(self, b: []const u8) !usize;
@@ -42,6 +46,80 @@ pub const Writer_VTable = zpp.VTableOf(.{
     .{ "write", *const fn (*anyopaque, []const u8) anyerror!usize },
     .{ "flush", *const fn (*anyopaque) anyerror!void },
 });
+```
+
+---
+
+## Structural traits
+
+```
+trait_decl ::= "trait" Ident ":" "structural" "{" trait_member* "}"
+```
+
+Adding `: structural` after a trait name opts the trait into duck typing.
+A type satisfies a structural trait if it has decls with matching names and
+shapes; no `impl` block is required. The standard nominal Z0040 ("type does
+not implement Trait") is suppressed for structural traits.
+
+`impl` blocks are still permitted on structural traits as a way to *re-export*
+or rename methods, but each method named in the block must already exist on
+the target type. If it does not, the compiler emits Z0002 ("structural impl
+references missing method"). This makes `: structural` strictly more permissive
+than nominal traits: anything that fits the shape works without ceremony, and
+anything that *claims* to fit is checked.
+
+```zigpp
+trait Sized : structural {
+    fn len(self) usize;
+}
+
+fn print_len(x: anytype) void where(x: Sized) {
+    std.debug.print("{d}\n", .{x.len()});
+}
+```
+
+Lowering: structural traits produce the same `_VTable` struct as nominal
+traits, but `where(x: Sized)` lowers to a `@hasDecl`-based shape check rather
+than a registry lookup. See `examples/structural_trait.zpp` and
+`examples/structural_advanced.zpp`.
+
+---
+
+## Trait method default bodies
+
+```
+trait_member ::= "fn" Ident "(" "self" ("," param)* ")" return_type (";" | block)
+```
+
+A trait method may carry a body. The body is the *default*: any `impl` block
+may omit the method, in which case calls resolve to the default. Calls go
+through the same vtable; the default is installed as the slot's function
+pointer when an impl does not supply one.
+
+```zigpp
+trait Greeter {
+    fn name(self) []const u8;
+    fn greet(self) []const u8 {
+        return "hello";
+    }
+}
+
+impl Greeter for World {
+    fn name(self) []const u8 { return "world"; }
+    // greet omitted -> default used
+}
+```
+
+Lowering: each defaulted method emits a free function
+`<Trait>_default_<method>` that takes `*anyopaque` and forwards to the body.
+The vtable construction in `zpp.trait.implFor` falls back to the default
+symbol when the impl tuple does not name the method. See
+`examples/trait_default.zpp`.
+
+```zig
+fn Greeter_default_greet(_: *anyopaque) []const u8 {
+    return "hello";
+}
 ```
 
 ---
@@ -259,7 +337,7 @@ of the listed forbidden classes. Initial classes:
 - `.noalloc` — no allocator method calls
 - `.noio` — no I/O (`std.debug.print`, `std.fs`, `std.io`, ...)
 - `.nopanic` — no `@panic`, no array bounds violation in safe code
-- `.noasync` — no I/O suspension
+- `.noasync` — no thread spawn, task group work, or suspension primitives
 - `.nocustom("X")` — no user-defined `.custom("X")` effect
 
 ```zigpp
@@ -273,6 +351,21 @@ fn hash_block(b: []const u8) u64 effects(.noalloc, .nopanic) {
 Lowering: effects are erased to a comment and recorded in the diagnostics
 phase; violations emit Z0030. Effects do not change codegen.
 
+### `.noasync`
+
+The sixth axis of effect inference, added in v0.2. A function annotated
+`effects(.noasync)` may not, transitively, perform any of:
+
+- `std.Thread.spawn` / `std.Thread.Pool.spawn`
+- `zpp.async.TaskGroup.spawn`, `.spawnWithToken`, `.cancel`
+- `@asyncCall`, `suspend`, `resume`
+- any function whose own inferred effect set lacks `.noasync`
+
+The check is a syntactic + name-based heuristic walking the call graph; a
+violating call site emits Z0030 with a `noasync` axis label. See
+`examples/effects_noasync.zpp` and `examples/effects_nopanic_demo.zpp` for
+the pattern shared by the panic-free and async-free axes.
+
 ---
 
 ## `derive(.{...})`
@@ -281,12 +374,19 @@ phase; violations emit Z0030. Effects do not change codegen.
 derive_attr ::= "derive" "(" "." "{" "." Ident ("," "." Ident)* "}" ")"
 ```
 
-Attaches typed, comptime-built helpers to a struct. Initial set:
+Attaches typed, comptime-built helpers to a struct. Implemented helpers:
 
 - `.Hash` — `pub fn hash(value: T) u64`
 - `.Eq` — `pub fn eql(a: T, b: T) bool`
 - `.Debug` — `pub fn format(value: T, w: *std.Io.Writer) !void`
+- `.Ord` — `pub fn cmp(self: T, other: T) i32`
+- `.Default` — `pub fn default() T`
 - `.Clone` — `pub fn clone(value: T, alloc: std.mem.Allocator) !T`
+- `.Json` — JSON formatting helper namespace
+- `.Iterator` — `pub fn iter(self: T) FieldIter`
+- `.Serialize` — `pub fn serialize(self: T, alloc: std.mem.Allocator) ![]u8`
+- `.Compare` — `pub fn lt/le/gt/ge(self: T, other: T) bool`
+- `.FromStr` — `pub fn fromStr(s: []const u8, alloc: std.mem.Allocator) !T`
 
 ```zigpp
 derive(.{ .Hash, .Eq }) struct User {
@@ -329,6 +429,191 @@ pub const Plugin = extern struct {
 
 The host loads a plugin by reading a pointer to a `Plugin` instance from a
 known exported symbol; no runtime trait machinery is involved.
+
+---
+
+## Concurrency / `TaskGroup`
+
+`zpp.async.TaskGroup` is the structured concurrency primitive. A group owns
+a set of spawned tasks and joins them on `deinit`; failures propagate.
+
+```zigpp
+fn run(allocator: std.mem.Allocator) !void {
+    using group = zpp.async.TaskGroup.init(allocator);
+    try group.spawn(workA, .{});
+    try group.spawn(workB, .{});
+}
+```
+
+v0.2 additions:
+
+- `cancel()` — request cancellation of every still-running task in the
+  group. Tasks observe cancellation via their `CancelToken` and are expected
+  to return early. `cancel()` is idempotent.
+- `spawnWithToken(fn_with_token, args)` — spawn a task that receives a
+  `*CancelToken` as its first argument. The token's `isCancelled()` is the
+  cooperative check.
+- Watchdog auto-cancel — when any task in the group returns an error, the
+  group implicitly calls `cancel()` on the remaining tasks before joining.
+  This makes "first error wins, rest abort" the default shape.
+
+```zigpp
+fn worker(tok: *zpp.async.CancelToken) !void {
+    while (!tok.isCancelled()) {
+        // ...
+    }
+}
+
+fn run(allocator: std.mem.Allocator) !void {
+    using group = zpp.async.TaskGroup.init(allocator);
+    try group.spawnWithToken(worker, .{});
+    try group.spawnWithToken(worker, .{});
+    // group.cancel() also fires automatically if any task returns an error
+}
+```
+
+Cancellation is cooperative: a task that ignores its token will run to
+completion. See `examples/async_group.zpp` for the extended demo.
+
+---
+
+## `build.zpp`
+
+A project may write its build script in `.zpp`. `zpp build` looks for, in
+order:
+
+1. `build.zig` — used as-is, no lowering. Hand-written wins.
+2. `build.zpp` — lowered to `build.zig` on demand, then forwarded to the
+   Zig toolchain.
+
+The lowering is mtime-based: if `build.zig` exists and is newer than
+`build.zpp`, the lowering step is skipped. Otherwise `build.zpp` is lowered
+and the resulting `build.zig` is written next to it (and listed in
+`.gitignore` by `zpp init`). Subsequent commands detect the freshness and
+short-circuit.
+
+```zigpp
+// build.zpp
+const std = @import("std");
+
+pub fn build(b: *std.Build) void {
+    const exe = b.addExecutable(.{
+        .name = "demo",
+        .root_source_file = b.path("src/main.zpp"),
+    });
+    b.installArtifact(exe);
+}
+```
+
+Precedence rule: a hand-written `build.zig` is never overwritten. If both
+files are present, `zpp build` warns once and uses `build.zig`.
+
+---
+
+## Stdlib
+
+### `Writer`
+
+`zpp.writer.Writer` is the canonical output trait. It uses the same vtable
+shape as any other `dyn`-capable trait (instance pointer + `Writer_VTable`).
+
+```zigpp
+trait Writer {
+    fn write(self, b: []const u8) !usize;
+    fn flush(self) !void;
+}
+```
+
+Concrete implementations shipped in `lib/zpp/writer.zig`:
+
+- `StdoutWriter` — wraps `std.io.getStdOut().writer()`.
+- `FileWriter` — wraps `std.fs.File`, closes on `deinit` (it is `owned`).
+- `BufferedWriter(comptime N: usize)` — fixed-size in-line buffer of N
+  bytes; `flush()` drains to the wrapped inner writer. `N = 4096` is the
+  recommended default.
+
+All three have a static `*_Writer_vtable` so they can be passed as
+`dyn Writer` without boxing. See `examples/writer_buffered.zpp`.
+
+---
+
+## CLI
+
+`zpp` is the project entrypoint. Subcommands:
+
+- `zpp build` — lower `build.zpp` (if present, see above) and forward all
+  remaining args to `zig build`.
+- `zpp run <file.zpp>` — lower-and-run a single file.
+- `zpp test [paths...]` — discover `test "..."` blocks across `.zpp` files
+  under the given paths (default `src/` and `tests/`), lower them, and
+  invoke `zig test` on the result.
+  - `--filter <substring>` — only run tests whose name matches.
+  - `--release` — pass `-Doptimize=ReleaseSafe` through.
+  - `-v` / `--verbose` — print each test's lowered command line.
+- `zpp explain <code>` — print the long-form description of a Z00xx
+  diagnostic.
+  - `--json` — emit IDE-consumable JSON: `{ "code", "title", "summary",
+    "examples": [...], "related": [...] }`. Stable schema.
+- `zpp init [name]` — scaffold a new project.
+  - `--template lib` — library crate (default if `name` ends in `-lib`).
+  - `--template exe` — executable with `src/main.zpp`.
+  - `--template plugin` — `extern interface` plugin skeleton with a host
+    loader test.
+- `zpp fmt [paths...]` — format `.zpp` files in place.
+
+Exit codes follow the Zig convention: 0 success, 1 user error, 2 internal
+compiler error.
+
+---
+
+## IDE
+
+The Zig++ language server (`zpp-lsp`) speaks LSP 3.17. As of v0.2 the
+following capabilities are advertised:
+
+- `textDocument/hover`
+- `textDocument/definition`
+- `textDocument/references`
+- `textDocument/documentSymbol`
+- `textDocument/completion`
+- `textDocument/rename`
+- `textDocument/formatting`
+- `textDocument/inlayHint` — effect axes, derived methods, default-body
+  fills.
+- `textDocument/foldingRange` — trait/impl/struct/`test "..."` blocks.
+- `textDocument/implementation` — jump from a trait method to every
+  impl.
+- `textDocument/prepareCallHierarchy`,
+  `callHierarchy/incomingCalls`,
+  `callHierarchy/outgoingCalls` — three methods, full call-graph
+  navigation.
+- `textDocument/codeLens` — "run test", "show lowered Zig", "explain
+  diagnostic".
+
+Diagnostics published via `textDocument/publishDiagnostics` carry the
+`Z00xx` code and a `data` field equivalent to the JSON returned by
+`zpp explain --json`, so editors can render rich descriptions inline.
+
+---
+
+## Migration helpers
+
+`zpp migrate` rewrites idiomatic Zig into idiomatic Zig++. The patterns it
+recognises (v0.2):
+
+- `@panic(...)` guarding an entry condition becomes `requires(...)`.
+- A hand-written `pub fn hash` / `pub fn eql` pair becomes
+  `derive(.{ .Hash, .Eq })`.
+- A struct that takes an allocator and has a `deinit(*Self)` becomes an
+  `owned struct`.
+- A function whose body provably performs no I/O gains
+  `effects(.noio)`.
+- An `error.X` thrown immediately on entry becomes
+  `requires(..., "X")`.
+
+Each pattern is opt-in via `--patterns=...` and reported with the same
+diagnostic codes the compiler would emit had the user written the source
+that way.
 
 ---
 

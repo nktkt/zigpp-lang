@@ -69,7 +69,7 @@ pub fn build(b: *std.Build) void {
         run_step.dependOn(&run_cmd.step);
     }
 
-    const test_step = b.step("test", "Run unit tests for compiler/, lib/, tools/");
+    const test_step = b.step("test", "Run unit tests for compiler/, lib/, tools/, tests/");
     // The lowering snapshot runner under tests/lowering/snapshots.zig honors
     // ZPP_UPDATE_SNAPSHOTS: unset (or "0") = compare and fail on drift,
     // anything else = rewrite. CI must NOT set it. See tests/lowering/README.md.
@@ -86,7 +86,7 @@ pub fn build(b: *std.Build) void {
         check_step.dependOn(&check_cmd.step);
     }
 
-    const examples_step = b.step("examples", "Lower and build every .zpp under examples/");
+    const examples_step = b.step("examples", "Lower every .zpp under examples/ to .zig (no execution)");
     if (main_exe) |exe| {
         addExampleSteps(b, exe, examples_step);
     }

@@ -4,6 +4,8 @@ const fmt_lib = @import("zpp_fmt.zig");
 const lsp = @import("zpp_lsp.zig");
 const doc = @import("zpp_doc.zig");
 const migrate = @import("zpp_migrate.zig");
+const test_runner = @import("zpp_test.zig");
+const init_templates = @import("zpp_init_templates.zig");
 const zpp_build = @import("zpp_buildzpp.zig");
 
 pub const version_string = "zpp 0.1.0 (Zig++ research compiler)";
@@ -27,6 +29,7 @@ const Subcommand = enum {
     lsp,
     init,
     explain,
+    @"test",
     version,
     help,
 
@@ -43,6 +46,7 @@ const Subcommand = enum {
             .{ "lsp", .lsp },
             .{ "init", .init },
             .{ "explain", .explain },
+            .{ "test", .@"test" },
             .{ "version", .version },
             .{ "--version", .version },
             .{ "-V", .version },
@@ -127,9 +131,14 @@ pub fn run(allocator: std.mem.Allocator, argv: [][:0]u8) !ExitCode {
         .lsp => cmdLsp(allocator, rest),
         .init => cmdInit(allocator, rest),
         .explain => cmdExplain(rest),
+        .@"test" => cmdTest(allocator, rest),
         .version => cmdVersion(),
         .help => cmdHelp(rest),
     };
+}
+
+fn cmdTest(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
+    return test_runner.runTest(allocator, args);
 }
 
 fn printUsage() void {
@@ -147,11 +156,12 @@ fn printUsage() void {
         \\    fmt [paths...]       format .zpp files in place
         \\    check [paths...]     parse + sema, no codegen, exit nonzero on diagnostic
         \\    watch [paths...]     re-run `check` whenever any .zpp under <paths> changes
-        \\    doc [paths...]       generate markdown docs from .zpp doc comments
+        \\    doc [paths...]       generate markdown (or --html) docs from .zpp doc comments
         \\    migrate <file.zig>   suggest .zpp rewrites for a .zig file
         \\    lsp                  start LSP server on stdin/stdout
-        \\    init <name>          scaffold a new Zig++ project under <name>/
+        \\    init <name> [opts]   scaffold a new Zig++ project under <name>/ (--template exe|lib|plugin)
         \\    explain <Z####|-l>   explain a diagnostic code in detail (--list to see all)
+        \\    test [paths...]      lower .zpp files and run their `test` blocks via `zig test`
         \\    version              print version
         \\    help [subcommand]    show this help (or details for a subcommand)
         \\
@@ -178,13 +188,14 @@ fn cmdHelp(args: [][:0]u8) !ExitCode {
         .run => "zpp run <file.zpp>\n  Lower a single .zpp source, write it to a tmp file, and execute it via `zig run`.\n",
         .lower => "zpp lower <file.zpp>\n  Print lowered .zig source for one file to stdout.\n",
         .fmt => "zpp fmt [paths...]\n  Re-emit .zpp files with canonical whitespace; expands directories.\n",
-        .check => "zpp check [paths...]\n  Parse and semantically analyse .zpp files; emit diagnostics; exit 1 on error.\n",
+        .check => "zpp check [paths...]\n  Parse and semantically analyze .zpp files; emit diagnostics; exit 1 on error.\n",
         .watch => "zpp watch [paths...]\n  Snapshot .zpp file mtimes and re-run `zpp check` whenever any of them changes. Polls every ~500ms; Ctrl-C to exit.\n",
-        .doc => "zpp doc [paths...]\n  Walk .zpp files and emit Markdown for trait/fn/struct/extern interface decls.\n",
+        .doc => "zpp doc [paths...] [-o docs/] [--html]\n  Walk .zpp files and emit Markdown (default) or self-contained HTML (--html) for trait/fn/struct/extern interface decls.\n",
         .migrate => "zpp migrate <file.zig>\n  Diff suggestions to convert defer/init/deinit patterns to Zig++.\n",
         .lsp => "zpp lsp\n  Speak LSP over stdio. Run from your editor; not for human use.\n",
-        .init => "zpp init <name>\n  Scaffold a new Zig++ project under <name>/ with build.zig, build.zig.zon, src/main.zpp, and a starter README. Refuses to overwrite an existing directory.\n",
+        .init => "zpp init <name> [--template exe|lib|plugin]\n  Scaffold a new Zig++ project under <name>/. Defaults to --template exe (executable).\n  Other templates: lib (public-API library, no main), plugin (extern interface + host).\n  Use `zpp init --list` to see every template with a one-line description.\n  Short forms: `-t lib` is equivalent to `--template=lib`.\n  Refuses to overwrite an existing directory.\n",
         .explain => "zpp explain <Z####|--list>\n  Print a long-form explanation of a diagnostic code, or `--list` to see every code with a one-line summary.\n",
+        .@"test" => "zpp test [paths...] [--filter <p>] [--release] [-v]\n  Lower every .zpp under <paths> (default '.') into .zpp-cache/<rel>.zig, then run `zig test` against each lowered file. Exits non-zero if any file fails.\n",
         .version => "zpp version\n  Print compiler version.\n",
         .help => "zpp help [subcommand]\n  Show this message.\n",
     };
@@ -898,6 +909,12 @@ fn cmdExplainList() !ExitCode {
     return .ok;
 }
 
+const InitOptions = struct {
+    project_name: ?[]const u8 = null,
+    template_name: []const u8 = "exe",
+    list_only: bool = false,
+};
+
 // --------------------------------------------------------------------------
 // JSON output for `zpp explain --json` and `zpp explain --list --json`.
 //
@@ -1152,24 +1169,74 @@ fn parseExamples(
     return try found.toOwnedSlice(allocator);
 }
 
-const tpl_main_zpp = @embedFile("templates/main.zpp");
-const tpl_build_zig = @embedFile("templates/build.zig");
-const tpl_build_zon = @embedFile("templates/build.zig.zon");
-const tpl_gitignore = @embedFile("templates/gitignore");
-const tpl_readme_md = @embedFile("templates/README.md");
-
-const TemplateFile = struct { rel_path: []const u8, contents: []const u8 };
+fn parseInitArgs(args: [][:0]u8) !InitOptions {
+    var opts = InitOptions{};
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "--list") or std.mem.eql(u8, a, "--templates")) {
+            opts.list_only = true;
+            continue;
+        }
+        if (std.mem.eql(u8, a, "--template") or std.mem.eql(u8, a, "-t")) {
+            if (i + 1 >= args.len) {
+                ePrint("zpp init: --template requires a value (one of: exe, lib, plugin)\n", .{});
+                return error.UsageError;
+            }
+            opts.template_name = args[i + 1];
+            i += 1;
+            continue;
+        }
+        if (std.mem.startsWith(u8, a, "--template=")) {
+            opts.template_name = a["--template=".len..];
+            continue;
+        }
+        if (std.mem.startsWith(u8, a, "-t=")) {
+            opts.template_name = a["-t=".len..];
+            continue;
+        }
+        if (std.mem.startsWith(u8, a, "-")) {
+            ePrint("zpp init: unknown option '{s}'\n", .{a});
+            return error.UsageError;
+        }
+        if (opts.project_name != null) {
+            ePrint("zpp init: too many positional arguments (got '{s}' after '{s}')\n", .{ a, opts.project_name.? });
+            return error.UsageError;
+        }
+        opts.project_name = a;
+    }
+    return opts;
+}
 
 fn cmdInit(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
-    if (args.len != 1) {
-        ePrint("zpp init: expected exactly one project name\n", .{});
-        return .usage_error;
+    const opts = parseInitArgs(args) catch return .usage_error;
+
+    if (opts.list_only) {
+        oPrint("Available templates for `zpp init --template <name>`:\n\n", .{});
+        for (init_templates.all_templates) |t| {
+            oPrint("  {s:<8}  {s}\n", .{ t.name, t.description });
+        }
+        oPrint("\nDefault: exe.\n", .{});
+        return .ok;
     }
-    const name = args[0];
+
+    const name = opts.project_name orelse {
+        ePrint("zpp init: expected a project name\n", .{});
+        ePrint("       run `zpp init --list` to see available templates.\n", .{});
+        return .usage_error;
+    };
     if (!isValidProjectName(name)) {
         ePrint("zpp init: '{s}' is not a valid project name (must match [A-Za-z][A-Za-z0-9_-]*)\n", .{name});
         return .user_error;
     }
+
+    const template = init_templates.findByName(opts.template_name) orelse {
+        ePrint("zpp init: unknown template '{s}'. Valid options:\n", .{opts.template_name});
+        for (init_templates.all_templates) |t| {
+            ePrint("    {s}  — {s}\n", .{ t.name, t.description });
+        }
+        return .user_error;
+    };
 
     // Refuse to clobber an existing directory.
     if (std.fs.cwd().access(name, .{})) |_| {
@@ -1180,7 +1247,6 @@ fn cmdInit(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
     try std.fs.cwd().makePath(name);
     var dir = try std.fs.cwd().openDir(name, .{});
     defer dir.close();
-    try dir.makePath("src");
 
     // Pick a fingerprint deterministic per project name. The fingerprint is
     // free-form for unpublished packages; we just need a stable nonzero u64.
@@ -1189,29 +1255,26 @@ fn cmdInit(allocator: std.mem.Allocator, args: [][:0]u8) !ExitCode {
     const fp_hex = try std.fmt.allocPrint(allocator, "{x}", .{fp});
     defer allocator.free(fp_hex);
 
-    const files = [_]TemplateFile{
-        .{ .rel_path = "src/main.zpp", .contents = tpl_main_zpp },
-        .{ .rel_path = "build.zig", .contents = tpl_build_zig },
-        .{ .rel_path = "build.zig.zon", .contents = tpl_build_zon },
-        .{ .rel_path = ".gitignore", .contents = tpl_gitignore },
-        .{ .rel_path = "README.md", .contents = tpl_readme_md },
-    };
-
-    for (files) |f| {
-        const rendered = try renderTemplate(allocator, f.contents, name, fp_hex);
-        defer allocator.free(rendered);
-        try dir.writeFile(.{ .sub_path = f.rel_path, .data = rendered });
+    for (template.files) |f| {
+        const rendered_path = try init_templates.render(allocator, f.path, name, fp_hex);
+        defer allocator.free(rendered_path);
+        const rendered_content = try init_templates.render(allocator, f.content, name, fp_hex);
+        defer allocator.free(rendered_content);
+        if (std.fs.path.dirname(rendered_path)) |sub| {
+            try dir.makePath(sub);
+        }
+        try dir.writeFile(.{ .sub_path = rendered_path, .data = rendered_content });
     }
 
     oPrint(
-        \\Scaffolded '{s}/'.
+        \\Scaffolded '{s}/' from template '{s}'.
         \\
         \\Next steps:
         \\    cd {s}
         \\    zig fetch --save git+https://github.com/nktkt/zigpp-lang
-        \\    zig build run
+        \\    zig build
         \\
-    , .{ name, name });
+    , .{ name, template.name, name });
     return .ok;
 }
 
@@ -1223,32 +1286,6 @@ fn isValidProjectName(name: []const u8) bool {
         if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '-')) return false;
     }
     return true;
-}
-
-fn renderTemplate(allocator: std.mem.Allocator, src: []const u8, name: []const u8, fp_hex: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .{};
-    defer out.deinit(allocator);
-    var i: usize = 0;
-    while (i < src.len) {
-        if (substrAt(src, i, "ZPP_PROJECT_NAME")) {
-            try out.appendSlice(allocator, name);
-            i += "ZPP_PROJECT_NAME".len;
-            continue;
-        }
-        if (substrAt(src, i, "ZPP_PROJECT_FINGERPRINT")) {
-            try out.appendSlice(allocator, fp_hex);
-            i += "ZPP_PROJECT_FINGERPRINT".len;
-            continue;
-        }
-        try out.append(allocator, src[i]);
-        i += 1;
-    }
-    return out.toOwnedSlice(allocator);
-}
-
-fn substrAt(haystack: []const u8, at: usize, needle: []const u8) bool {
-    if (at + needle.len > haystack.len) return false;
-    return std.mem.eql(u8, haystack[at .. at + needle.len], needle);
 }
 
 fn termToExit(term: std.process.Child.Term) ExitCode {
@@ -1310,12 +1347,40 @@ test "isValidProjectName accepts identifiers and rejects edge cases" {
     try std.testing.expect(!isValidProjectName("foo.bar"));
 }
 
-test "renderTemplate substitutes both placeholders" {
-    const a = std.testing.allocator;
-    const tpl = "name=ZPP_PROJECT_NAME, fp=0xZPP_PROJECT_FINGERPRINT;";
-    const out = try renderTemplate(a, tpl, "demo", "deadbeef");
-    defer a.free(out);
-    try std.testing.expectEqualStrings("name=demo, fp=0xdeadbeef;", out);
+test "parseInitArgs defaults to exe and accepts a project name" {
+    var name_buf: [4:0]u8 = .{ 'h', 'i', 'y', 'a' };
+    var args = [_][:0]u8{&name_buf};
+    const opts = try parseInitArgs(&args);
+    try std.testing.expectEqualStrings("hiya", opts.project_name.?);
+    try std.testing.expectEqualStrings("exe", opts.template_name);
+    try std.testing.expect(!opts.list_only);
+}
+
+test "parseInitArgs handles --template lib (long form, separate arg)" {
+    var name_buf: [4:0]u8 = .{ 'h', 'i', 'y', 'a' };
+    var flag_buf: [10:0]u8 = .{ '-', '-', 't', 'e', 'm', 'p', 'l', 'a', 't', 'e' };
+    var val_buf: [3:0]u8 = .{ 'l', 'i', 'b' };
+    var args = [_][:0]u8{ &flag_buf, &val_buf, &name_buf };
+    const opts = try parseInitArgs(&args);
+    try std.testing.expectEqualStrings("hiya", opts.project_name.?);
+    try std.testing.expectEqualStrings("lib", opts.template_name);
+}
+
+test "parseInitArgs handles -t plugin (short form)" {
+    var name_buf: [4:0]u8 = .{ 'h', 'i', 'y', 'a' };
+    var short_buf: [2:0]u8 = .{ '-', 't' };
+    var val_buf: [6:0]u8 = .{ 'p', 'l', 'u', 'g', 'i', 'n' };
+    var args = [_][:0]u8{ &short_buf, &val_buf, &name_buf };
+    const opts = try parseInitArgs(&args);
+    try std.testing.expectEqualStrings("plugin", opts.template_name);
+}
+
+test "parseInitArgs handles --list" {
+    var list_buf: [6:0]u8 = .{ '-', '-', 'l', 'i', 's', 't' };
+    var args = [_][:0]u8{&list_buf};
+    const opts = try parseInitArgs(&args);
+    try std.testing.expect(opts.list_only);
+    try std.testing.expect(opts.project_name == null);
 }
 
 test "Subcommand.parse covers init and explain" {
