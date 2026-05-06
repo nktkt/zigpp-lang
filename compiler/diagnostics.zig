@@ -150,14 +150,14 @@ pub fn explain(code: Code) []const u8 {
         \\anything that needs releasing.
         ,
         .z0011_using_type_lacks_deinit =>
-        \\Z0011: `using` target has no deinit
+        \\Z0011: `using` target lacks deinit
         \\
         \\`using x = expr;` lowers to `var x = expr; defer x.deinit();`. The
         \\type of `expr` must therefore have a `deinit` method, otherwise the
         \\generated `defer` would not type-check.
         \\
         \\Triggers:
-        \\    using s = "literal";   // []const u8 has no deinit
+        \\    using s = "literal";   // []const u8 lacks deinit
         \\
         \\Fix:
         \\    var s: []const u8 = "literal";   // plain var, no auto-cleanup
