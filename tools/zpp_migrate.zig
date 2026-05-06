@@ -1189,3 +1189,95 @@ test "pattern 8: negative — if return error without precondition context does 
     defer plan.deinit(a);
     try std.testing.expectEqual(@as(usize, 0), countKind(plan, .requires_for_if_return_error));
 }
+
+// ---- Pattern 2: `comptime T: type` → `impl Trait` ----------------------
+
+test "pattern 2: fn with `comptime T: type` parameter is flagged" {
+    // The detector at zpp_migrate.zig:166-176 was previously uncovered.
+    // Any function declaring a `comptime T: type` parameter should fire
+    // the suggestion; the rewrite is null (suggestion-only) and the note
+    // points the user at `impl SomeTrait` as the visible-dispatch
+    // alternative.
+    const a = std.testing.allocator;
+    const src =
+        \\fn applyOp(comptime T: type, x: *T, y: *T) void {
+        \\    _ = x; _ = y;
+        \\}
+        \\
+    ;
+    var plan = try analyse(a, src);
+    defer plan.deinit(a);
+    const s = findKind(plan, .impl_trait_for_comptime_t) orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expect(!s.auto_apply);
+    try std.testing.expect(s.rewrite == null);
+    try std.testing.expect(std.mem.indexOf(u8, s.note, "impl SomeTrait") != null);
+}
+
+test "pattern 2: negative — fn without `comptime T: type` does not trigger" {
+    const a = std.testing.allocator;
+    const src =
+        \\fn applyOp(x: u32, y: u32) u32 {
+        \\    return x + y;
+        \\}
+        \\
+    ;
+    var plan = try analyse(a, src);
+    defer plan.deinit(a);
+    try std.testing.expectEqual(@as(usize, 0), countKind(plan, .impl_trait_for_comptime_t));
+}
+
+// ---- Pattern 5: more body shapes (Wyhash, sum) ------------------------
+
+test "pattern 5: Wyhash-style hash body triggers" {
+    // The detector at zpp_migrate.zig:618-621 considers three body
+    // shapes "obvious": XOR, sum (`+=` / ` + `), and `std.hash.Wyhash`.
+    // The pre-existing tests only covered XOR; this one closes the
+    // Wyhash branch.
+    const a = std.testing.allocator;
+    const src =
+        \\const Key = struct {
+        \\    data: []const u8,
+        \\    pub fn hash(self: *const @This()) u64 {
+        \\        var h = std.hash.Wyhash.init(0);
+        \\        h.update(self.data);
+        \\        return h.final();
+        \\    }
+        \\};
+        \\
+    ;
+    var plan = try analyse(a, src);
+    defer plan.deinit(a);
+    const s = findKind(plan, .derive_hash_for_manual_hash) orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expect(!s.auto_apply);
+    try std.testing.expect(s.rewrite == null);
+}
+
+test "pattern 5: sum-style hash body triggers" {
+    // Mirrors the XOR test but exercises the `+=` accumulator branch
+    // (the third body-shape recognised by the detector).
+    const a = std.testing.allocator;
+    const src =
+        \\const Counter = struct {
+        \\    bytes: []const u8,
+        \\    pub fn hash(self: *const @This()) u64 {
+        \\        var acc: u64 = 0;
+        \\        for (self.bytes) |b| acc += b;
+        \\        return acc;
+        \\    }
+        \\};
+        \\
+    ;
+    var plan = try analyse(a, src);
+    defer plan.deinit(a);
+    const s = findKind(plan, .derive_hash_for_manual_hash) orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expect(!s.auto_apply);
+}
