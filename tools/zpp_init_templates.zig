@@ -527,6 +527,7 @@ const plugin_readme =
     \\## Build
     \\
     \\```sh
+    \\# First time only: pin the zigpp dependency hash.
     \\zig fetch --save git+https://github.com/nktkt/zigpp-lang
     \\zig build              # builds plugin shared lib + host exe
     \\zig build run          # runs the host
