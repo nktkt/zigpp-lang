@@ -1,0 +1,128 @@
+/// writer_buffered.zpp — a hand-rolled Writer trait stack: `BufferedWriter`
+/// wrapping a `FileWriter`.
+///
+/// Teaches: a small `Writer` trait with a single `write(self, bytes)`
+/// method, two impls (FileWriter, BufferedWriter), and a generic
+/// `print(impl Writer, ...)` helper. Many small `print(...)` calls
+/// against the BufferedWriter coalesce into one big `write` to the
+/// underlying FileWriter when `flush()` runs. We then read the file
+/// back to confirm the bytes actually landed.
+///
+/// (Note: this example was originally meant to use `zpp.writer.Writer`
+/// from the runtime library, but that module hasn't landed on this
+/// branch yet — only `zpp.trait`, `zpp.owned`, `zpp.contract`,
+/// `zpp.dyn_mod`, `zpp.async_mod`, `zpp.derive`. We instead hand-roll
+/// the same stack to demonstrate the pattern.)
+///
+/// Lowered Zig sketch:
+///     const Writer_VTable = struct {
+///         write: *const fn (ptr: *anyopaque, bytes: []const u8) anyerror!void,
+///     };
+///     const FileWriter = struct {
+///         file: std.fs.File,
+///         pub fn write(self: *@This(), bytes: []const u8) anyerror!void { ... }
+///     };
+///     const BufferedWriter = struct {
+///         buf: [64]u8,
+///         len: usize = 0,
+///         inner: *FileWriter,
+///         pub fn write(self: *@This(), bytes: []const u8) anyerror!void { ... }
+///         pub fn flush(self: *@This()) anyerror!void { ... }
+///     };
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+trait Writer {
+    fn write(self, bytes: []const u8) anyerror!void;
+}
+
+// Direct file-backed writer. Each `write` call is one syscall.
+const FileWriter = struct {
+    file: std.fs.File,
+};
+
+// Fixed-capacity buffered writer wrapping any `*FileWriter`. Coalesces
+// many small writes into a single drain on `flush()`. A real
+// `BufferedWriter(N)` would be generic over capacity; this one
+// hard-codes 64 bytes to keep the example self-contained.
+const BufferedWriter = struct {
+    buf: [64]u8 = undefined,
+    len: usize = 0,
+    inner: *FileWriter,
+
+    pub fn flush(self: *BufferedWriter) anyerror!void {
+        if (self.len == 0) return;
+        try self.inner.file.writeAll(self.buf[0..self.len]);
+        self.len = 0;
+    }
+};
+
+impl Writer for FileWriter {
+    fn write(self, bytes: []const u8) anyerror!void {
+        try self.file.writeAll(bytes);
+    }
+}
+
+impl Writer for BufferedWriter {
+    fn write(self, bytes: []const u8) anyerror!void {
+        // If `bytes` doesn't fit, drain first. If it still doesn't fit
+        // (i.e. larger than the buffer itself), bypass the buffer and
+        // forward straight to the inner writer.
+        if (self.len + bytes.len > self.buf.len) {
+            try self.flush();
+            if (bytes.len > self.buf.len) {
+                try self.inner.file.writeAll(bytes);
+                return;
+            }
+        }
+        @memcpy(self.buf[self.len .. self.len + bytes.len], bytes);
+        self.len += bytes.len;
+    }
+}
+
+// Generic `print` over anything that implements `Writer`. The compiler
+// monomorphizes once per concrete writer type.
+fn print(w: impl Writer, bytes: []const u8) !void {
+    try w.write(bytes);
+}
+
+pub fn main() !void {
+    const tmp_path = "writer_buffered.tmp";
+
+    // Open a fresh file and wrap it in a BufferedWriter(64-ish).
+    const file = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true, .read = true });
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+    defer file.close();
+
+    var fw = FileWriter{ .file = file };
+    var bw = BufferedWriter{ .inner = &fw };
+
+    // Many small writes — none of these reach the file yet because they
+    // all fit in the 64-byte staging buffer.
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        try print(&bw, "hi-");
+    }
+    try print(&bw, "[mid]");
+
+    // A write that doesn't fit forces a drain; afterwards the new bytes
+    // are buffered.
+    try print(&bw, "0123456789-0123456789-0123456789-0123456789-end\n");
+
+    // Explicit flush: drains whatever is still buffered.
+    try bw.flush();
+
+    // Read the file back and report first/last bytes to confirm bytes
+    // actually landed on disk.
+    try file.seekTo(0);
+    var read_buf: [256]u8 = undefined;
+    const n = try file.readAll(&read_buf);
+    const contents = read_buf[0..n];
+
+    std.debug.print("wrote {d} bytes to '{s}'\n", .{ n, tmp_path });
+    std.debug.print("first 16: \"{s}\"\n", .{contents[0..@min(contents.len, 16)]});
+    const tail_start = if (contents.len >= 16) contents.len - 16 else 0;
+    std.debug.print("last 16:  \"{s}\"\n", .{contents[tail_start..]});
+    std.debug.print("(buffered writes coalesced; explicit flush drained the tail)\n", .{});
+}
