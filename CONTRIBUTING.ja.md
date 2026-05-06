@@ -14,7 +14,7 @@ cd zigpp-lang
 
 zig build              # ランタイム / コンパイラ / 5 CLI をビルド
 zig build test         # 全ユニットテスト + 統合テスト (~140 件)
-zig build e2e          # 全 example を低下・ビルド・実行
+zig build e2e          # 全 example を lower・ビルド・実行
 ZPP_FUZZ_ITERS=1000 zig build fuzz   # ファザー実行 (opt-in)
 ```
 

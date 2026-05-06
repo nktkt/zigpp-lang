@@ -34,7 +34,7 @@ Every cost a program incurs must be visible at the call site or binding site.
 | Ownership move      | `own var` declaration plus `move expr`        |
 | Async / suspend     | An async I/O parameter (Zig 0.16+ I/O model)  |
 | Unsafe primitive    | `@as`, `@ptrCast`, `extern`, etc., unchanged  |
-| Effect class        | `effects(.noalloc, .pure, .nopanic, ...)`     |
+| Effect class        | `effects(.noalloc, .noio, .nopanic, ...)`     |
 
 If you cannot see one of these in source, it is not happening. The compiler is
 not allowed to insert one. Lowerings are pure rewrites; they never introduce a
@@ -93,7 +93,7 @@ language. Any `.zig` file is a valid `.zpp` file (modulo new keywords).
 | Move semantics                | C++ / Rust    | `own var` + `move expr`, sema-checked         |
 | Existential dispatch          | Rust / Swift  | `dyn Trait` fat pointer                       |
 | Structured concurrency        | Swift         | `TaskGroup` over Zig 0.16 I/O                 |
-| Effect annotations            | OCaml / Koka  | `effects(.noalloc, .pure, .nopanic)`          |
+| Effect annotations            | OCaml / Koka  | `effects(.noalloc, .noio, .nopanic)`          |
 | Contracts                     | Eiffel / Ada  | `requires`/`ensures`/`invariant`              |
 | Derive macros (typed!)        | Rust          | `derive(.{ .Hash, .Eq })` over comptime       |
 | Module / package manifest     | Rust          | Reuses `build.zig.zon`                        |

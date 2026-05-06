@@ -335,11 +335,10 @@ Attached to a function signature. Asserts the function performs no operation
 of the listed forbidden classes. Initial classes:
 
 - `.noalloc` — no allocator method calls
-- `.pure` — no I/O, no global mutation
-- `.noio` — no read/write syscalls or `std.io.*` writer/reader use
+- `.noio` — no I/O (`std.debug.print`, `std.fs`, `std.io`, ...)
 - `.nopanic` — no `@panic`, no array bounds violation in safe code
-- `.noasync` — no thread spawn, no task group, no suspension primitives
-- `.notrap` — no integer overflow trap (must use wrap operators)
+- `.noasync` — no thread spawn, task group work, or suspension primitives
+- `.nocustom("X")` — no user-defined `.custom("X")` effect
 
 ```zigpp
 fn hash_block(b: []const u8) u64 effects(.noalloc, .nopanic) {
@@ -375,12 +374,19 @@ the pattern shared by the panic-free and async-free axes.
 derive_attr ::= "derive" "(" "." "{" "." Ident ("," "." Ident)* "}" ")"
 ```
 
-Attaches typed, comptime-built helpers to a struct. Initial set:
+Attaches typed, comptime-built helpers to a struct. Implemented helpers:
 
 - `.Hash` — `pub fn hash(value: T) u64`
 - `.Eq` — `pub fn eql(a: T, b: T) bool`
-- `.Format` — `pub fn format(value: T, w: anytype) !void`
+- `.Debug` — `pub fn format(value: T, w: *std.Io.Writer) !void`
+- `.Ord` — `pub fn cmp(self: T, other: T) i32`
+- `.Default` — `pub fn default() T`
 - `.Clone` — `pub fn clone(value: T, alloc: std.mem.Allocator) !T`
+- `.Json` — JSON formatting helper namespace
+- `.Iterator` — `pub fn iter(self: T) FieldIter`
+- `.Serialize` — `pub fn serialize(self: T, alloc: std.mem.Allocator) ![]u8`
+- `.Compare` — `pub fn lt/le/gt/ge(self: T, other: T) bool`
+- `.FromStr` — `pub fn fromStr(s: []const u8, alloc: std.mem.Allocator) !T`
 
 ```zigpp
 derive(.{ .Hash, .Eq }) struct User {
