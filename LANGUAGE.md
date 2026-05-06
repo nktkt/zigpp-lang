@@ -257,10 +257,10 @@ Attached to a function signature. Asserts the function performs no operation
 of the listed forbidden classes. Initial classes:
 
 - `.noalloc` — no allocator method calls
-- `.pure` — no I/O, no global mutation
+- `.noio` — no I/O (`std.debug.print`, `std.fs`, `std.io`, ...)
 - `.nopanic` — no `@panic`, no array bounds violation in safe code
 - `.noasync` — no I/O suspension
-- `.notrap` — no integer overflow trap (must use wrap operators)
+- `.nocustom("X")` — no user-defined `.custom("X")` effect
 
 ```zigpp
 fn hash_block(b: []const u8) u64 effects(.noalloc, .nopanic) {
@@ -285,7 +285,7 @@ Attaches typed, comptime-built helpers to a struct. Initial set:
 
 - `.Hash` — `pub fn hash(value: T) u64`
 - `.Eq` — `pub fn eql(a: T, b: T) bool`
-- `.Format` — `pub fn format(value: T, w: anytype) !void`
+- `.Debug` — `pub fn format(value: T, w: *std.Io.Writer) !void`
 - `.Clone` — `pub fn clone(value: T, alloc: std.mem.Allocator) !T`
 
 ```zigpp
