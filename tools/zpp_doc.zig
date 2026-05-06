@@ -49,7 +49,7 @@ pub fn runDoc(allocator: std.mem.Allocator, args: [][:0]u8) !@import("zpp.zig").
         } else if (std.mem.eql(u8, a, "--markdown") or std.mem.eql(u8, a, "--md")) {
             format = .markdown;
         } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
-            try emitErr("zpp doc [paths...] [-o docs/] [--html]\n", .{});
+            try emitErr("zpp doc [paths...] [-o docs/] [--html | --markdown | --md]\n", .{});
             return .ok;
         } else {
             try inputs.append(allocator, a);
