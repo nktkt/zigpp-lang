@@ -97,7 +97,7 @@ zigpp/
   compiler/            .zpp -> .zig frontend (token, ast, parser, sema, lower, diagnostics)
   lib/                 zpp runtime library (Dyn, Owned, contracts, derive, async, traits, testing)
   tools/               zpp CLI plus fmt, lsp, doc, migrate
-  examples/            8 .zpp programs covering each construct
+  examples/            11 .zpp programs covering each construct
   tests/               compile, diagnostic, snapshot, behavior, no-hidden-alloc, fuzz
   vscode/              VS Code extension (TextMate grammar + LSP client)
   README.md            this file

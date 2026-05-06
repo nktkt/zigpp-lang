@@ -85,7 +85,7 @@ zpp lower examples/hello_trait.zpp
 - **`derive(.{ Hash, Eq, Debug, Json })`** — `a.hash()` や `User.eq(a, b)` が
   そのまま動くよう、ターゲット型本体にメソッドを注入
 - **`where T: Trait`** — ジェネリック制約構文 (lowering 時はドロップ、ドキュメント目的)
-- **エンドツーエンド**: 8 つの example が `zpp run` および `zig build e2e` で完走確認済
+- **エンドツーエンド**: 10+ example が `zpp run` および `zig build e2e` で完走確認済
 - **fuzz-clean**: parser/sema/lowerer に対し 83,000 入力を投入、panic / leak /
   timeout ゼロ
 
@@ -98,7 +98,7 @@ zigpp/
   compiler/            .zpp -> .zig フロントエンド (token, ast, parser, sema, lower, diagnostics)
   lib/                 zpp ランタイム (Dyn, Owned, contracts, derive, async, traits, testing)
   tools/               zpp CLI + fmt / lsp / doc / migrate
-  examples/            8 個の .zpp プログラム (各構文要素を網羅)
+  examples/            11 個の .zpp プログラム (各構文要素を網羅)
   tests/               compile / diagnostic / snapshot / behavior / no-hidden-alloc / fuzz
   vscode/              VS Code 拡張 (TextMate grammar + LSP client)
   docs/                mdBook ドキュメントソース
